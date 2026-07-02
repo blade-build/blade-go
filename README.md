@@ -89,12 +89,30 @@ CI runs `go test -race -coverprofile` on every PR and reports coverage.
 ## Build
 
 ```sh
-go build ./...
-go test ./...
+go build ./...     # build all packages
+go test ./...      # run the test suite
 ```
 
-Requires Go 1.25+ (and, for the cc end-to-end test, `ninja` + a C++ compiler).
+Requires **Go 1.25+** (and, for the cc end-to-end test, `ninja` + a C++
+compiler). If your system `go` is older, keep `GOTOOLCHAIN=auto` (the Go default)
+so the right toolchain is fetched automatically:
+
+```sh
+go env -w GOTOOLCHAIN=auto   # once; restores Go's default if you set it to 'local'
+# or per-command: GOTOOLCHAIN=auto go build ./...
+```
+
+### The `blade` executable
+
+The CLI lives in `./cmd/blade`:
+
+```sh
+go build -o blade ./cmd/blade   # produce ./blade
+# or install onto your PATH (GOBIN, else GOPATH/bin):
+go install ./cmd/blade
+```
 
 As of Phase 3, `blade build //pkg:target` works for cc targets: it finds
 BLADE_ROOT, resolves the graph, generates `build64_release/build.ninja`, and runs
-ninja to produce the binary/archive.
+ninja to produce the binary/archive. `blade test //pkg/...` builds and runs every
+cc_test in the pattern.
