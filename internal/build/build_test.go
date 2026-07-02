@@ -535,6 +535,27 @@ cc_config(
 	}
 }
 
+func TestBuildExtraIncsUsesWorkspaceBuildDir(t *testing.T) {
+	// flare's extra_incs lambda references blade.workspace.build_dir; without it
+	// the lambda throws and every extra_incs (incl. the global -Ithirdparty) is
+	// silently dropped.
+	root := writeWorkspace(t, map[string]string{
+		"BLADE_ROOT": `
+cc_config(
+    extra_incs = lambda blade: ['thirdparty/', '%s/thirdparty/' % blade.workspace.build_dir],
+)`,
+		"p/BUILD": `cc_library(name = 'p', srcs = ['p.cc'])`,
+	})
+	ninjaFile, err := Build(root, []string{"//p:p"}, Options{RunNinja: false})
+	if err != nil {
+		t.Fatal(err)
+	}
+	out := string(mustRead(t, ninjaFile))
+	if !strings.Contains(out, "-Ithirdparty/") || !strings.Contains(out, "-Ibuild64_release/thirdparty/") {
+		t.Errorf("extra_incs lambda with blade.workspace.build_dir not applied:\n%s", out)
+	}
+}
+
 func TestBuildCcTestLinksGtest(t *testing.T) {
 	root := writeWorkspace(t, map[string]string{
 		"BLADE_ROOT": `
