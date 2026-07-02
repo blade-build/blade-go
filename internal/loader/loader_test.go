@@ -290,3 +290,20 @@ func TestLoadMissingExtension(t *testing.T) {
 		t.Fatal("expected an error loading a missing extension")
 	}
 }
+
+func TestBuildTarget(t *testing.T) {
+	root := workspace(t, map[string]string{
+		"p/BUILD": `cc_library(name = 'p', srcs = ['base.cc'] + (['x86.S'] if build_target.arch == 'x86_64' else ['arm.S']))`,
+	})
+	l := New(root)
+	if err := l.LoadBuildFile(filepath.Join(root, "p/BUILD")); err != nil {
+		t.Fatal(err)
+	}
+	tgt := l.Targets.Get("//p:p")
+	if tgt == nil {
+		t.Fatal("target using build_target.arch did not load")
+	}
+	if srcs := tgt.AttrStrings("srcs"); len(srcs) != 2 || srcs[0] != "base.cc" {
+		t.Errorf("srcs=%v (expected base.cc + one arch source)", srcs)
+	}
+}

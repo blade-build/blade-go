@@ -202,3 +202,64 @@ func pkgConfig(t *testing.T, pkg string) (cflags, libs string) {
 	}
 	return strings.TrimSpace(string(c)), strings.TrimSpace(string(l))
 }
+
+func TestGenerateGenRule(t *testing.T) {
+	g, _ := buildGraph(t, map[string]string{
+		"g/BUILD": `
+gen_rule(name = 'mk', srcs = ['in.tmpl'], outs = ['out.cc'], cmd = 'cp $SRCS $OUTS', visibility = ['PUBLIC'])
+cc_library(name = 'lib', srcs = ['out.cc'], deps = [':mk'])
+`,
+	}, "//g:lib")
+	f, err := New(toolchain.Detect()).Generate(g)
+	if err != nil {
+		t.Fatal(err)
+	}
+	out := f.String()
+	wants := []string{
+		"build build64_release/g/out.cc: gen g/in.tmpl",
+		"cmd = cp g/in.tmpl build64_release/g/out.cc", // $SRCS/$OUTS substituted
+		// the consumer compiles the generated source from its build-dir path:
+		"build build64_release/g/lib.objs/out.cc.o: cxx build64_release/g/out.cc",
+	}
+	for _, w := range wants {
+		if !strings.Contains(out, w) {
+			t.Errorf("missing %q\n---\n%s", w, out)
+		}
+	}
+}
+
+func TestEndToEndGenRule(t *testing.T) {
+	if _, err := exec.LookPath("ninja"); err != nil {
+		t.Skip("ninja not available")
+	}
+	tc := toolchain.Detect()
+	if _, err := exec.LookPath(tc.CXX); err != nil {
+		t.Skip("C++ compiler not available")
+	}
+	g, root := buildGraph(t, map[string]string{
+		"g/tmpl.cc": "#include <cstdio>\nint main(){ printf(\"gen-ok\\n\"); return 0; }\n",
+		"g/BUILD": `
+gen_rule(name = 'mk', srcs = ['tmpl.cc'], outs = ['hello.cc'], cmd = 'cp $SRCS $OUTS', visibility = ['PUBLIC'])
+cc_binary(name = 'app', srcs = ['hello.cc'], deps = [':mk'])
+`,
+	}, "//g:app")
+	f, err := New(tc).Generate(g)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(root, "build.ninja"), []byte(f.String()), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	cmd := exec.Command("ninja", "-f", "build.ninja", "build64_release/g/app")
+	cmd.Dir = root
+	if o, err := cmd.CombinedOutput(); err != nil {
+		t.Fatalf("ninja: %v\n%s\n%s", err, o, f.String())
+	}
+	o, err := exec.Command(filepath.Join(root, "build64_release/g/app")).CombinedOutput()
+	if err != nil {
+		t.Fatalf("run: %v\n%s", err, o)
+	}
+	if strings.TrimSpace(string(o)) != "gen-ok" {
+		t.Errorf("output=%q", strings.TrimSpace(string(o)))
+	}
+}

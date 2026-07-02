@@ -146,6 +146,15 @@ func ccToolchain() starlark.Value {
 	})
 }
 
+// BuildTarget returns the `build_target` object BUILD files use for
+// platform-conditional sources (flare uses build_target.arch).
+func BuildTarget() starlark.Value {
+	return starlarkstruct.FromStringDict(starlarkstruct.Default, starlark.StringDict{
+		"arch": starlark.String(HostArch()),
+		"bits": starlark.MakeInt(64),
+	})
+}
+
 func dirBuiltin(name, result string) *starlark.Builtin {
 	return starlark.NewBuiltin(name, func(_ *starlark.Thread, b *starlark.Builtin, args starlark.Tuple, kwargs []starlark.Tuple) (starlark.Value, error) {
 		if err := starlark.UnpackArgs(b.Name(), args, kwargs); err != nil {

@@ -54,14 +54,17 @@ func (gen *Generator) Generate(g *graph.Graph) (*ninja.File, error) {
 
 	libOf := map[*graph.Node]string{}
 	genHdrsOf := map[*graph.Node][]string{}
+	genFilesOf := map[*graph.Node]map[string]string{}
 	for _, n := range sorted {
 		switch {
+		case n.Target.Type == "gen_rule":
+			gen.emitGenRule(f, n, genFilesOf)
 		case n.Target.Type == "proto_library":
 			lib, hdrs := gen.emitProto(f, n)
 			libOf[n] = lib
 			genHdrsOf[n] = hdrs
 		case IsCC(n.Target.Type):
-			objs := gen.emitCompiles(f, n, gen.transitiveGenHdrs(n, genHdrsOf))
+			objs := gen.emitCompiles(f, n, gen.transitiveGenHdrs(n, genHdrsOf), gen.transitiveGenFiles(n, genFilesOf))
 			if n.Target.Type == "cc_library" {
 				lib := gen.libPath(n)
 				f.AddBuild(ninja.Build{Outputs: []string{lib}, Rule: "ar", Inputs: objs})
@@ -106,6 +109,56 @@ func (gen *Generator) emitRules(f *ninja.File) {
 		Name: "protoc", Description: "PROTOC ${in}",
 		Command: "${protoc} --proto_path=. --cpp_out=${builddir} ${in}",
 	})
+	f.AddRule(ninja.Rule{
+		Name: "gen", Description: "GEN ${out}",
+		Command: "${cmd}",
+	})
+}
+
+// emitGenRule emits a custom-command edge for a gen_rule. It records the mapping
+// from each declared `out` name to its build-dir path so a consumer that lists a
+// generated file in `srcs` resolves to the generated path.
+func (gen *Generator) emitGenRule(f *ninja.File, n *graph.Node, genFilesOf map[*graph.Node]map[string]string) {
+	pkg := n.Target.Package
+	var srcs, outs []string
+	for _, s := range n.Target.AttrStrings("srcs") {
+		srcs = append(srcs, path.Join(pkg, s))
+	}
+	outMap := map[string]string{}
+	for _, o := range n.Target.AttrStrings("outs") {
+		op := path.Join(gen.BuildDir, pkg, o)
+		outs = append(outs, op)
+		outMap[o] = op
+	}
+	genFilesOf[n] = outMap
+	cmd := strings.NewReplacer(
+		"$SRCS", strings.Join(srcs, " "),
+		"$OUTS", strings.Join(outs, " "),
+		"$BUILD_DIR", gen.BuildDir,
+	).Replace(n.Target.AttrString("cmd"))
+	f.AddBuild(ninja.Build{Outputs: outs, Rule: "gen", Inputs: srcs, Vars: map[string]string{"cmd": cmd}})
+}
+
+// transitiveGenFiles merges the out-name->path maps of all gen_rule deps, so a
+// consumer's generated sources can be resolved to their build-dir paths.
+func (gen *Generator) transitiveGenFiles(n *graph.Node, genFilesOf map[*graph.Node]map[string]string) map[string]string {
+	out := map[string]string{}
+	seen := map[*graph.Node]bool{}
+	var walk func(*graph.Node)
+	walk = func(node *graph.Node) {
+		for _, dep := range node.Deps {
+			if seen[dep] {
+				continue
+			}
+			seen[dep] = true
+			for k, v := range genFilesOf[dep] {
+				out[k] = v
+			}
+			walk(dep)
+		}
+	}
+	walk(n)
+	return out
 }
 
 // emitProto runs protoc for each .proto (generating .pb.cc/.pb.h under the build
@@ -135,12 +188,16 @@ func (gen *Generator) emitProto(f *ninja.File, n *graph.Node) (lib string, genHd
 
 // emitCompiles emits one compile edge per source and returns the object paths.
 // implicitHdrs (generated proto headers in the closure) are added as implicit
-// deps so codegen is ordered before compilation.
-func (gen *Generator) emitCompiles(f *ninja.File, n *graph.Node, implicitHdrs []string) []string {
+// deps so codegen is ordered before compilation. A source that names a generated
+// file (in genFiles) compiles from its build-dir path instead of the source tree.
+func (gen *Generator) emitCompiles(f *ninja.File, n *graph.Node, implicitHdrs []string, genFiles map[string]string) []string {
 	inc := gen.includes(n)
 	var objs []string
 	for _, src := range n.Target.AttrStrings("srcs") {
 		srcPath := path.Join(n.Target.Package, src)
+		if gp, ok := genFiles[src]; ok {
+			srcPath = gp
+		}
 		obj := path.Join(gen.BuildDir, n.Target.Package, n.Target.Name+".objs", src) + gen.Tc.ObjSuffix()
 		rule := "cc"
 		if isCXXSource(src) {
