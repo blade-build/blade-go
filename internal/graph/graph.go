@@ -190,6 +190,13 @@ func (b *Builder) packagesUnder(base string) ([]string, error) {
 			return nil // skip unreadable dirs
 		}
 		if d.IsDir() {
+			// Don't descend into dirs that never hold source BUILD files: the
+			// build output tree (build64_release, with its huge vcpkg install)
+			// and hidden dirs (.git, .cache, ...). This is the bulk of a naive
+			// whole-repo walk's os.ReadDir cost.
+			if name := d.Name(); p != root && (name == b.loader.BuildDir || strings.HasPrefix(name, ".")) {
+				return filepath.SkipDir
+			}
 			if _, e := os.Stat(filepath.Join(p, "BUILD")); e == nil {
 				rel, _ := filepath.Rel(b.loader.Root, p)
 				pkg := filepath.ToSlash(rel)
