@@ -41,3 +41,16 @@ func (c *Config) Named(name string) []Section {
 	}
 	return out
 }
+
+// GetItem returns config item `item` from section `section` (the last call
+// wins), matching Blade's blade.config.get_item. The boolean reports presence.
+func (c *Config) GetItem(section, item string) (any, bool) {
+	for i := len(c.sections) - 1; i >= 0; i-- {
+		if c.sections[i].Name == section {
+			if v, ok := c.sections[i].Attrs[item]; ok {
+				return v, true
+			}
+		}
+	}
+	return nil, false
+}

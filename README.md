@@ -45,7 +45,7 @@ known.
 | 2 | Graph & analysis: dep expansion, visibility, topo sort | ✅ |
 | 3 | cc core → ninja: compile/ar/link, includes, syslibs, toolchain; `blade build` CLI | ✅ |
 | 4 | `proto_library` (protoc C++ codegen + ordering) | ✅ |
-| 5 | Custom rules (`define_rule`) + `cc_flare_library` | ⬜ |
+| 5 | Custom-rule extensions: `load()` + `native.*` macros + `blade.config.get_item` (the `cc_flare_library` pattern) | ✅ |
 | 6 | foreign / thirdparty (or vcpkg) | ⬜ |
 | 7 | test execution + coverage | ⬜ |
 | 8 | Full flare build + conformance capstone | ⬜ |
@@ -53,8 +53,14 @@ known.
 Each phase is one PR, merged after CI is green.
 
 Phase 1 status: loads flare's real `BLADE_ROOT` (lambdas, `blade` context,
-`load_value`) and **76 of 86** flare BUILD files (602 targets). The remaining 10
-need `load()`/`include()` (custom-rule machinery, Phase 5) and `build_target`.
+`load_value`) and **76 of 86** flare BUILD files (602 targets).
+
+Phase 5 adds the custom-rule machinery `cc_flare_library` uses: `load()` of a
+`.bld` extension, a `native.*` object whose rules register in the *calling*
+package (thread-local context), and `blade.config.get_item`. Still needed to load
+the last flare BUILD files: the `gen_rule` ninja backend, `build_target`, and
+`include()` (tracked for the flare capstone; flare's `.bld` also needs its
+`assert`→`fail` tweak since Starlark has no `assert`).
 
 ## Testing
 

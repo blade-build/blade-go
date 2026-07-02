@@ -70,19 +70,73 @@ func ConfigModule() starlark.Value {
 	return starlarkstruct.FromStringDict(starlarkstruct.Default, commonMembers())
 }
 
-// BuildModule returns the `blade` value for the build phase (BUILD files) in the
-// given package. It adds a host-derived cc_toolchain proxy and the current
-// source/target directories.
-//
-// Phase 1 note: cc_toolchain reports the host os/arch (real toolchain selection,
-// incl. cross-compile and MSVC, arrives with the cc backend). That is enough for
-// the platform conditionals BUILD files use at load time.
-func BuildModule(pkg, buildDir string) starlark.Value {
+// ConfigGetter reads a configuration item, backing blade.config.get_item.
+type ConfigGetter interface {
+	GetItem(section, item string) (any, bool)
+}
+
+// BuildModule returns the `blade` value for the build phase (BUILD files and
+// .bld extensions) in the given package. It adds a host-derived cc_toolchain
+// proxy, the current source/target directories, and blade.config (backed by
+// cfg, which may be nil).
+func BuildModule(pkg, buildDir string, cfg ConfigGetter) starlark.Value {
 	members := commonMembers()
 	members["cc_toolchain"] = ccToolchain()
 	members["current_source_dir"] = dirBuiltin("blade.current_source_dir", pkg)
 	members["current_target_dir"] = dirBuiltin("blade.current_target_dir", path.Join(buildDir, pkg))
+	members["config"] = configModule(cfg)
 	return starlarkstruct.FromStringDict(starlarkstruct.Default, members)
+}
+
+func configModule(cfg ConfigGetter) starlark.Value {
+	getItem := starlark.NewBuiltin("blade.config.get_item", func(_ *starlark.Thread, b *starlark.Builtin, args starlark.Tuple, kwargs []starlark.Tuple) (starlark.Value, error) {
+		var section, item string
+		if err := starlark.UnpackArgs(b.Name(), args, kwargs, "section", &section, "item", &item); err != nil {
+			return nil, err
+		}
+		if cfg != nil {
+			if v, ok := cfg.GetItem(section, item); ok {
+				return GoToStarlark(v), nil
+			}
+		}
+		return starlark.None, nil
+	})
+	return starlarkstruct.FromStringDict(starlarkstruct.Default, starlark.StringDict{"get_item": getItem})
+}
+
+// GoToStarlark converts a Go value (as produced by the loader's Starlark->Go
+// conversion) back into a Starlark value.
+func GoToStarlark(v any) starlark.Value {
+	switch v := v.(type) {
+	case nil:
+		return starlark.None
+	case bool:
+		return starlark.Bool(v)
+	case int64:
+		return starlark.MakeInt64(v)
+	case int:
+		return starlark.MakeInt(v)
+	case float64:
+		return starlark.Float(v)
+	case string:
+		return starlark.String(v)
+	case []any:
+		elems := make([]starlark.Value, len(v))
+		for i, e := range v {
+			elems[i] = GoToStarlark(e)
+		}
+		return starlark.NewList(elems)
+	case map[string]any:
+		d := starlark.NewDict(len(v))
+		for k, e := range v {
+			_ = d.SetKey(starlark.String(k), GoToStarlark(e))
+		}
+		return d
+	case starlark.Value:
+		return v
+	default:
+		return starlark.None
+	}
 }
 
 func ccToolchain() starlark.Value {

@@ -65,7 +65,7 @@ func TestGetenv(t *testing.T) {
 }
 
 func TestBuildModule(t *testing.T) {
-	m := BuildModule("flare/base", "build64_release")
+	m := BuildModule("flare/base", "build64_release", nil)
 	if got := eval(t, m, `blade.cc_toolchain.target_os`); string(got.(starlark.String)) != HostOS() {
 		t.Errorf("cc_toolchain.target_os=%v", got)
 	}
@@ -127,5 +127,58 @@ func TestConfigModuleHasNoToolchain(t *testing.T) {
 		"blade.cc_toolchain", starlark.StringDict{"blade": ConfigModule()})
 	if err == nil {
 		t.Fatal("expected cc_toolchain to be absent in the config phase")
+	}
+}
+
+type fakeConfig map[string]any
+
+func (f fakeConfig) GetItem(section, item string) (any, bool) {
+	v, ok := f[section+"."+item]
+	return v, ok
+}
+
+func TestConfigGetItem(t *testing.T) {
+	cfg := fakeConfig{
+		"proto_library_config.protoc":        "MYPROTOC",
+		"proto_library_config.protobuf_libs": []any{"#protobuf", "#pthread"},
+	}
+	m := BuildModule("pkg", "build64_release", cfg)
+	if got := eval(t, m, `blade.config.get_item('proto_library_config', 'protoc')`); string(got.(starlark.String)) != "MYPROTOC" {
+		t.Errorf("get_item protoc=%v", got)
+	}
+	got := eval(t, m, `blade.config.get_item('proto_library_config', 'protobuf_libs')`).(*starlark.List)
+	if got.Len() != 2 {
+		t.Errorf("protobuf_libs len=%d", got.Len())
+	}
+	if v := eval(t, m, `blade.config.get_item('x', 'y')`); v != starlark.None {
+		t.Errorf("absent get_item=%v, want None", v)
+	}
+}
+
+func TestGoToStarlark(t *testing.T) {
+	cases := []struct {
+		in   any
+		expr string
+		want string
+	}{
+		{nil, "v == None", "True"},
+		{true, "v == True", "True"},
+		{int64(5), "v == 5", "True"},
+		{3.5, "v == 3.5", "True"},
+		{"hi", "v == 'hi'", "True"},
+		{[]any{"a", int64(1)}, "v == ['a', 1]", "True"},
+		{map[string]any{"k": "val"}, "v['k'] == 'val'", "True"},
+	}
+	for _, c := range cases {
+		thread := &starlark.Thread{Name: "t"}
+		out, err := starlark.EvalOptions(&syntax.FileOptions{}, thread, "t.star", c.expr,
+			starlark.StringDict{"v": GoToStarlark(c.in)})
+		if err != nil {
+			t.Errorf("GoToStarlark(%v): %v", c.in, err)
+			continue
+		}
+		if out.String() != c.want {
+			t.Errorf("GoToStarlark(%v): %s = %s, want %s", c.in, c.expr, out, c.want)
+		}
 	}
 }

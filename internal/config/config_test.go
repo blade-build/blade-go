@@ -28,3 +28,21 @@ func TestConfig(t *testing.T) {
 		t.Errorf("Named(absent)=%v, want nil", got)
 	}
 }
+
+func TestGetItem(t *testing.T) {
+	c := New()
+	c.Record("cc_config", map[string]any{"opt": "old"}, "p:1")
+	c.Record("cc_config", map[string]any{"opt": "new", "flag": int64(2)}, "p:2")
+	if v, ok := c.GetItem("cc_config", "opt"); !ok || v != "new" {
+		t.Errorf("GetItem opt=%v,%v want new (last wins)", v, ok)
+	}
+	if v, ok := c.GetItem("cc_config", "flag"); !ok || v != int64(2) {
+		t.Errorf("GetItem flag=%v,%v", v, ok)
+	}
+	if _, ok := c.GetItem("cc_config", "absent"); ok {
+		t.Error("absent item should report ok=false")
+	}
+	if _, ok := c.GetItem("no_section", "x"); ok {
+		t.Error("absent section should report ok=false")
+	}
+}

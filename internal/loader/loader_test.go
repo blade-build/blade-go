@@ -4,6 +4,7 @@ import (
 	"os"
 	"path/filepath"
 	"reflect"
+	"strings"
 	"testing"
 )
 
@@ -235,5 +236,57 @@ func TestConfigRejectsPositionalArgs(t *testing.T) {
 	l := New(root)
 	if err := l.LoadConfigFile(filepath.Join(root, "BLADE_ROOT")); err == nil {
 		t.Fatal("expected config to reject positional args")
+	}
+}
+
+func TestLoadNativeMacro(t *testing.T) {
+	// A .bld macro (cc_flare_library style) loaded via load(), calling native.*
+	// rules that must register in the *calling* BUILD's package, and reading
+	// config via blade.config.get_item.
+	root := workspace(t, map[string]string{
+		"BLADE_ROOT": `proto_library_config(protoc = 'MYPROTOC')`,
+		"tools/rules.bld": `
+def my_rpc_library(name, srcs, deps = []):
+    protoc = blade.config.get_item('proto_library_config', 'protoc')
+    native.gen_rule(name = name + '_gen', srcs = srcs, outs = [name + '.pb.cc'],
+                    cmd = protoc + ' --out ' + srcs[0])
+    native.cc_library(name = name, srcs = [name + '.pb.cc'], deps = deps,
+                      visibility = ['PUBLIC'])
+`,
+		"app/BUILD": `
+load('//tools/rules.bld', 'my_rpc_library')
+my_rpc_library(name = 'svc', srcs = ['svc.proto'], deps = ['//base:base'])
+`,
+	})
+	l := New(root)
+	if err := l.LoadConfigFile(filepath.Join(root, "BLADE_ROOT")); err != nil {
+		t.Fatal(err)
+	}
+	if err := l.LoadBuildFile(filepath.Join(root, "app/BUILD")); err != nil {
+		t.Fatal(err)
+	}
+
+	cc := l.Targets.Get("//app:svc")
+	if cc == nil || cc.Type != "cc_library" {
+		t.Fatalf("cc_library //app:svc not registered in the calling package; labels=%v", l.Targets.Labels())
+	}
+	if got := cc.AttrStrings("srcs"); len(got) != 1 || got[0] != "svc.pb.cc" {
+		t.Errorf("expanded cc_library srcs=%v", got)
+	}
+	gen := l.Targets.Get("//app:svc_gen")
+	if gen == nil || gen.Type != "gen_rule" {
+		t.Fatalf("gen_rule //app:svc_gen not registered")
+	}
+	if cmd := gen.AttrString("cmd"); !strings.Contains(cmd, "MYPROTOC") {
+		t.Errorf("blade.config.get_item not resolved in macro: cmd=%q", cmd)
+	}
+}
+
+func TestLoadMissingExtension(t *testing.T) {
+	root := workspace(t, map[string]string{
+		"app/BUILD": `load('//nope/missing.bld', 'x')`,
+	})
+	if err := New(root).LoadBuildFile(filepath.Join(root, "app/BUILD")); err == nil {
+		t.Fatal("expected an error loading a missing extension")
 	}
 }
