@@ -151,8 +151,9 @@ func (l *Loader) LoadBuildFile(pathname string) error {
 // same builtins work when invoked from a macro loaded via load().
 func (l *Loader) buildEnv() starlark.StringDict {
 	pre := starlark.StringDict{
-		"blade":  bladectx.BuildModule("", l.BuildDir, l.Config),
-		"native": l.nativeModule(),
+		"blade":        bladectx.BuildModule("", l.BuildDir, l.Config),
+		"native":       l.nativeModule(),
+		"build_target": bladectx.BuildTarget(),
 	}
 	l.addRuleBuiltins(pre)
 	l.addHelperBuiltins(pre)

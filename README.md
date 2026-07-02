@@ -46,8 +46,8 @@ known.
 | 3 | cc core → ninja: compile/ar/link, includes, syslibs, toolchain; `blade build` CLI | ✅ |
 | 4 | `proto_library` (protoc C++ codegen + ordering) | ✅ |
 | 5 | Custom-rule extensions: `load()` + `native.*` macros + `blade.config.get_item` (the `cc_flare_library` pattern) | ✅ |
-| 6 | foreign / thirdparty (or vcpkg) | ⬜ |
-| 7 | test execution + coverage | ⬜ |
+| 6 | `gen_rule` ninja backend + generated-source resolution + `build_target` | ✅ |
+| 7 | thirdparty via **vcpkg** + `cc_test` execution | ⬜ |
 | 8 | Full flare build + conformance capstone | ⬜ |
 
 Each phase is one PR, merged after CI is green.
