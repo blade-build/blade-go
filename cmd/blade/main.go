@@ -9,10 +9,20 @@ import (
 	"os"
 
 	"github.com/blade-build/blade-go/internal/build"
+	"github.com/blade-build/blade-go/internal/resource"
 	"github.com/blade-build/blade-go/internal/version"
 )
 
 func main() {
+	// Hidden codegen subcommands invoked from generated ninja edges
+	// (resource_library), mirroring blade's builtin_command architecture.
+	if len(os.Args) >= 2 && (os.Args[1] == "__gen-resource" || os.Args[1] == "__gen-resource-index") {
+		if err := runResourceGen(os.Args[1], os.Args[2:]); err != nil {
+			fmt.Fprintln(os.Stderr, "blade: "+err.Error())
+			os.Exit(1)
+		}
+		return
+	}
 	if len(os.Args) >= 2 && (os.Args[1] == "build" || os.Args[1] == "test") {
 		run := runBuild
 		if os.Args[1] == "test" {
@@ -25,6 +35,23 @@ func main() {
 		return
 	}
 	fmt.Printf("blade-go %s (reimplementation in progress)\n", version.Version)
+}
+
+// runResourceGen dispatches the resource_library codegen subcommands.
+//
+//	__gen-resource       <out.c> <in>
+//	__gen-resource-index <name> <path> <hdr> <src.c> <resource>...
+func runResourceGen(cmd string, args []string) error {
+	if cmd == "__gen-resource" {
+		if len(args) != 2 {
+			return fmt.Errorf("__gen-resource: want <out> <in>")
+		}
+		return resource.GenerateResource(args[1], args[0])
+	}
+	if len(args) < 4 {
+		return fmt.Errorf("__gen-resource-index: want <name> <path> <hdr> <src> [resource...]")
+	}
+	return resource.GenerateIndex(args[0], args[1], args[2], args[3], args[4:])
 }
 
 func runTest(targets []string) error {

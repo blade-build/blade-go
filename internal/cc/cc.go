@@ -17,6 +17,7 @@ import (
 type Generator struct {
 	Tc             *toolchain.Toolchain
 	BuildDir       string           // build output dir (e.g. "build64_release")
+	Self           string           // path to the blade-go binary (resource_library codegen)
 	Protoc         string           // protoc executable (proto_library codegen)
 	ProtobufLibs   []string         // system libs a proto_library pulls in (bare names)
 	ProtobufVcpkgs []label.VcpkgDep // protobuf libs pinned in vcpkg (flare's idiom)
@@ -61,6 +62,11 @@ func (gen *Generator) Generate(g *graph.Graph) (*ninja.File, error) {
 	f.SetVar("cxx", gen.Tc.CXX)
 	f.SetVar("ar", gen.Tc.AR)
 	f.SetVar("protoc", gen.Protoc)
+	self := gen.Self
+	if self == "" {
+		self = "blade-go"
+	}
+	f.SetVar("self", self)
 	f.SetVar("builddir", gen.BuildDir)
 	f.SetVar("cppflags", strings.Join(gen.Cppflags, " "))
 	f.SetVar("cxxflags", strings.Join(gen.Cxxflags, " "))
@@ -86,6 +92,10 @@ func (gen *Generator) Generate(g *graph.Graph) (*ninja.File, error) {
 			gen.foreignIncs[n] = incs
 		case n.Target.Type == "proto_library":
 			lib, hdrs := gen.emitProto(f, n)
+			libOf[n] = lib
+			genHdrsOf[n] = hdrs
+		case n.Target.Type == "resource_library":
+			lib, hdrs := gen.emitResourceLibrary(f, n)
 			libOf[n] = lib
 			genHdrsOf[n] = hdrs
 		case IsCC(n.Target.Type):
@@ -154,6 +164,55 @@ func (gen *Generator) emitRules(f *ninja.File) {
 		Name: "gen", Description: "GEN ${out}",
 		Command: "${cmd}",
 	})
+	f.AddRule(ninja.Rule{
+		Name: "resource_index", Description: "RESOURCE INDEX ${out}",
+		Command: "${self} __gen-resource-index ${name} ${path} ${out} ${in}",
+	})
+	f.AddRule(ninja.Rule{
+		Name: "resource", Description: "RESOURCE ${in}",
+		Command: "${self} __gen-resource ${out} ${in}",
+	})
+}
+
+// emitResourceLibrary emits blade's resource_library: an index (.h/.c) plus one
+// embedded-bytes .c per resource, all compiled and archived. Returns the archive
+// and the generated index header (a consumer include).
+func (gen *Generator) emitResourceLibrary(f *ninja.File, n *graph.Node) (lib string, genHdrs []string) {
+	pkg := n.Target.Package
+	name := n.Target.Name
+	resources := n.Target.AttrStrings("srcs")
+	indexH := path.Join(gen.BuildDir, pkg, name+".h")
+	indexC := path.Join(gen.BuildDir, pkg, name+".c")
+
+	var srcPaths []string
+	for _, r := range resources {
+		srcPaths = append(srcPaths, path.Join(pkg, r))
+	}
+	f.AddBuild(ninja.Build{
+		Outputs: []string{indexH, indexC}, Rule: "resource_index", Inputs: srcPaths,
+		Vars: map[string]string{"name": name, "path": pkg},
+	})
+
+	inc := gen.includes(n)
+	cFiles := []string{indexC}
+	for _, r := range resources {
+		rc := path.Join(gen.BuildDir, pkg, r+".c")
+		f.AddBuild(ninja.Build{Outputs: []string{rc}, Rule: "resource", Inputs: []string{path.Join(pkg, r)}})
+		cFiles = append(cFiles, rc)
+	}
+
+	var objs []string
+	for _, cf := range cFiles {
+		obj := cf + gen.Tc.ObjSuffix()
+		f.AddBuild(ninja.Build{
+			Outputs: []string{obj}, Rule: "cc", Inputs: []string{cf},
+			Implicit: []string{indexH}, Vars: map[string]string{"includes": inc},
+		})
+		objs = append(objs, obj)
+	}
+	lib = gen.libPath(n)
+	f.AddBuild(ninja.Build{Outputs: []string{lib}, Rule: "ar", Inputs: objs})
+	return lib, []string{indexH}
 }
 
 // emitGenRule emits a custom-command edge for a gen_rule. It records the mapping

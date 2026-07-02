@@ -222,6 +222,9 @@ func plan(root string, targets []string) (*graph.Graph, *cc.Generator, *ninja.Fi
 		return nil, nil, nil, err
 	}
 	gen := cc.New(toolchain.Detect())
+	if exe, err := os.Executable(); err == nil {
+		gen.Self = exe // resource_library codegen re-invokes this binary
+	}
 	configureVcpkg(gen, l.Config, root)
 	configureProto(gen, l.Config)
 	configureCcFlags(gen, l.Config)

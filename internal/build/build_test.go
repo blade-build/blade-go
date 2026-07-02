@@ -253,6 +253,44 @@ func mustRead(t *testing.T, p string) []byte {
 	return data
 }
 
+func TestBuildResourceLibrary(t *testing.T) {
+	// A resource_library embeds files: emit the index (.h/.c) + a .c per
+	// resource, compile all, archive, and let a consumer link it.
+	root := t.TempDir()
+	files := map[string]string{
+		"BLADE_ROOT": `cc_config()`,
+		"res/a.txt":  "hello",
+		"res/BUILD":  `resource_library(name = 'r', srcs = ['a.txt'], visibility = ['PUBLIC'])`,
+		"app/BUILD":  `cc_binary(name = 'app', srcs = ['m.cc'], deps = ['//res:r'])`,
+	}
+	for rel, content := range files {
+		p := filepath.Join(root, rel)
+		if err := os.MkdirAll(filepath.Dir(p), 0o755); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(p, []byte(content), 0o644); err != nil {
+			t.Fatal(err)
+		}
+	}
+	ninjaFile, err := Build(root, []string{"//app:app"}, Options{RunNinja: false})
+	if err != nil {
+		t.Fatal(err)
+	}
+	out := string(mustRead(t, ninjaFile))
+	// index edge produces the .h and .c
+	if !strings.Contains(out, "build64_release/res/r.h build64_release/res/r.c: resource_index") {
+		t.Errorf("resource_index edge missing:\n%s", out)
+	}
+	// per-resource embed edge
+	if !strings.Contains(out, "build64_release/res/a.txt.c: resource res/a.txt") {
+		t.Errorf("resource embed edge missing:\n%s", out)
+	}
+	// archived and linked by the consumer
+	if !strings.Contains(out, "build64_release/res/libr.a") {
+		t.Errorf("resource archive missing:\n%s", out)
+	}
+}
+
 func TestRunsCcTests(t *testing.T) {
 	if _, err := exec.LookPath("ninja"); err != nil {
 		t.Skip("ninja not available")
