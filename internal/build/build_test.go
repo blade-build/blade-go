@@ -134,3 +134,48 @@ func TestBuildAppliesProtoConfig(t *testing.T) {
 		t.Errorf("configured protobuf_libs not applied:\n%s", out)
 	}
 }
+
+func TestRunsCcTests(t *testing.T) {
+	if _, err := exec.LookPath("ninja"); err != nil {
+		t.Skip("ninja not available")
+	}
+	if _, err := exec.LookPath("c++"); err != nil {
+		t.Skip("c++ not available")
+	}
+	root := t.TempDir()
+	files := map[string]string{
+		"BLADE_ROOT": `cc_config()`,
+		"t/pass.cc":  "int main(){ return 0; }\n",
+		"t/fail.cc":  "int main(){ return 1; }\n",
+		"t/BUILD": `
+cc_test(name = 'pass', srcs = ['pass.cc'])
+cc_test(name = 'fail', srcs = ['fail.cc'])
+`,
+	}
+	for rel, content := range files {
+		p := filepath.Join(root, rel)
+		if err := os.MkdirAll(filepath.Dir(p), 0o755); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(p, []byte(content), 0o644); err != nil {
+			t.Fatal(err)
+		}
+	}
+	results, err := Test(root, []string{"//t:pass", "//t:fail"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(results) != 2 {
+		t.Fatalf("got %d results, want 2", len(results))
+	}
+	byLabel := map[string]bool{}
+	for _, r := range results {
+		byLabel[r.Label] = r.Passed
+	}
+	if !byLabel["//t:pass"] {
+		t.Error("//t:pass should pass")
+	}
+	if byLabel["//t:fail"] {
+		t.Error("//t:fail should fail (exit 1)")
+	}
+}

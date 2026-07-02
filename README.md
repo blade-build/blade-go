@@ -47,8 +47,8 @@ known.
 | 4 | `proto_library` (protoc C++ codegen + ordering) | ✅ |
 | 5 | Custom-rule extensions: `load()` + `native.*` macros + `blade.config.get_item` (the `cc_flare_library` pattern) | ✅ |
 | 6 | `gen_rule` ninja backend + generated-source resolution + `build_target` | ✅ |
-| 7 | thirdparty via **vcpkg** + `cc_test` execution | ⬜ |
-| 8 | Full flare build + conformance capstone | ⬜ |
+| 7 | `cc_test` execution + `blade test` CLI | ✅ |
+| 8 | thirdparty via **vcpkg** + full flare build + differential harness | ⬜ |
 
 Each phase is one PR, merged after CI is green.
 

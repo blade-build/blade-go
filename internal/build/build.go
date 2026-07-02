@@ -12,7 +12,9 @@ import (
 	"github.com/blade-build/blade-go/internal/cc"
 	"github.com/blade-build/blade-go/internal/config"
 	"github.com/blade-build/blade-go/internal/graph"
+	"github.com/blade-build/blade-go/internal/label"
 	"github.com/blade-build/blade-go/internal/loader"
+	"github.com/blade-build/blade-go/internal/ninja"
 	"github.com/blade-build/blade-go/internal/toolchain"
 )
 
@@ -60,26 +62,30 @@ type Options struct {
 	RunNinja bool
 }
 
-// Build loads the workspace, generates the ninja file for the given targets, and
-// (optionally) runs ninja. It returns the path of the generated ninja file.
-func Build(root string, targets []string, opt Options) (string, error) {
+// plan loads the workspace and produces the graph, generator, and ninja file for
+// the given targets.
+func plan(root string, targets []string) (*graph.Graph, *cc.Generator, *ninja.File, error) {
 	l := loader.New(root)
 	bladeRoot := filepath.Join(root, "BLADE_ROOT")
 	if _, err := os.Stat(bladeRoot); err == nil {
 		if err := l.LoadConfigFile(bladeRoot); err != nil {
-			return "", fmt.Errorf("BLADE_ROOT: %w", err)
+			return nil, nil, nil, fmt.Errorf("BLADE_ROOT: %w", err)
 		}
 	}
 	g, err := graph.NewBuilder(l).Build(targets)
 	if err != nil {
-		return "", err
+		return nil, nil, nil, err
 	}
 	gen := cc.New(toolchain.Detect())
 	configureProto(gen, l.Config)
 	f, err := gen.Generate(g)
 	if err != nil {
-		return "", err
+		return nil, nil, nil, err
 	}
+	return g, gen, f, nil
+}
+
+func writeNinja(root string, gen *cc.Generator, f *ninja.File) (string, error) {
 	buildFile := filepath.Join(root, gen.BuildDir, "build.ninja")
 	if err := os.MkdirAll(filepath.Dir(buildFile), 0o755); err != nil {
 		return "", err
@@ -87,15 +93,73 @@ func Build(root string, targets []string, opt Options) (string, error) {
 	if err := os.WriteFile(buildFile, []byte(f.String()), 0o644); err != nil {
 		return "", err
 	}
+	return buildFile, nil
+}
+
+func runNinja(root, buildFile string, extraArgs ...string) error {
+	rel, _ := filepath.Rel(root, buildFile)
+	cmd := exec.Command("ninja", append([]string{"-f", rel}, extraArgs...)...)
+	cmd.Dir = root
+	cmd.Stdout = os.Stdout
+	cmd.Stderr = os.Stderr
+	if err := cmd.Run(); err != nil {
+		return fmt.Errorf("ninja: %w", err)
+	}
+	return nil
+}
+
+// Build loads the workspace, generates the ninja file for the given targets, and
+// (optionally) runs ninja. It returns the path of the generated ninja file.
+func Build(root string, targets []string, opt Options) (string, error) {
+	_, gen, f, err := plan(root, targets)
+	if err != nil {
+		return "", err
+	}
+	buildFile, err := writeNinja(root, gen, f)
+	if err != nil {
+		return "", err
+	}
 	if opt.RunNinja {
-		rel, _ := filepath.Rel(root, buildFile)
-		cmd := exec.Command("ninja", "-f", rel)
-		cmd.Dir = root
-		cmd.Stdout = os.Stdout
-		cmd.Stderr = os.Stderr
-		if err := cmd.Run(); err != nil {
-			return buildFile, fmt.Errorf("ninja: %w", err)
+		if err := runNinja(root, buildFile); err != nil {
+			return buildFile, err
 		}
 	}
 	return buildFile, nil
+}
+
+// TestResult is the outcome of running one cc_test target.
+type TestResult struct {
+	Label  string
+	Passed bool
+	Output string
+}
+
+// Test builds the given targets and runs each that is a cc_test, returning one
+// result per test target (in request order).
+func Test(root string, targets []string) ([]TestResult, error) {
+	g, gen, f, err := plan(root, targets)
+	if err != nil {
+		return nil, err
+	}
+	buildFile, err := writeNinja(root, gen, f)
+	if err != nil {
+		return nil, err
+	}
+	if err := runNinja(root, buildFile); err != nil {
+		return nil, err
+	}
+	var results []TestResult
+	for _, r := range targets {
+		lbl, err := label.Parse(r, "")
+		if err != nil {
+			return nil, err
+		}
+		node := g.Node(lbl.String())
+		if node == nil || node.Target.Type != "cc_test" {
+			continue
+		}
+		out, runErr := exec.Command(filepath.Join(root, gen.BinPath(node))).CombinedOutput()
+		results = append(results, TestResult{Label: node.Label(), Passed: runErr == nil, Output: string(out)})
+	}
+	return results, nil
 }

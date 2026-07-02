@@ -359,6 +359,10 @@ func (gen *Generator) binPath(n *graph.Node) string {
 	return path.Join(gen.BuildDir, n.Target.Package, gen.Tc.BinName(n.Target.Name))
 }
 
+// BinPath returns the (workspace-relative) executable path for a cc_binary /
+// cc_test / cc_benchmark node.
+func (gen *Generator) BinPath(n *graph.Node) string { return gen.binPath(n) }
+
 func isCXXSource(src string) bool {
 	for _, ext := range []string{".cc", ".cpp", ".cxx", ".C", ".c++", ".mm"} {
 		if strings.HasSuffix(src, ext) {
