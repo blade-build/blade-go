@@ -7,16 +7,19 @@ import (
 	"strings"
 
 	"github.com/blade-build/blade-go/internal/graph"
+	"github.com/blade-build/blade-go/internal/label"
 	"github.com/blade-build/blade-go/internal/ninja"
 	"github.com/blade-build/blade-go/internal/toolchain"
+	"github.com/blade-build/blade-go/internal/vcpkg"
 )
 
 // Generator turns a resolved graph into a ninja file.
 type Generator struct {
 	Tc           *toolchain.Toolchain
-	BuildDir     string   // build output dir (e.g. "build64_release")
-	Protoc       string   // protoc executable (proto_library codegen)
-	ProtobufLibs []string // system libs a proto_library pulls in (bare names)
+	BuildDir     string          // build output dir (e.g. "build64_release")
+	Protoc       string          // protoc executable (proto_library codegen)
+	ProtobufLibs []string        // system libs a proto_library pulls in (bare names)
+	Vcpkg        *vcpkg.Resolver // resolves vcpkg#port:lib thirdparty deps
 }
 
 // New returns a Generator with the default build dir and protobuf settings.
@@ -26,6 +29,7 @@ func New(tc *toolchain.Toolchain) *Generator {
 		BuildDir:     "build64_release",
 		Protoc:       "protoc",
 		ProtobufLibs: []string{"protobuf", "pthread"},
+		Vcpkg:        vcpkg.FromEnv(),
 	}
 }
 
@@ -81,7 +85,7 @@ func (gen *Generator) Generate(g *graph.Graph) (*ninja.File, error) {
 				Rule:     "link",
 				Inputs:   objs,
 				Implicit: implicit,
-				Vars:     map[string]string{"libs": gen.linkArgs(libs, syslibs)},
+				Vars:     map[string]string{"libs": gen.linkArgs(libs, syslibs, gen.vcpkgLinkArgs(n))},
 			})
 		}
 	}
@@ -282,6 +286,9 @@ func (gen *Generator) includes(n *graph.Node) string {
 		}
 	}
 	walk(n)
+	if inc := gen.Vcpkg.IncludeDir(); inc != "" && len(gen.transitiveVcpkgs(n)) > 0 {
+		dirs = append(dirs, inc)
+	}
 	var b strings.Builder
 	for i, d := range dirs {
 		if i > 0 {
@@ -291,6 +298,36 @@ func (gen *Generator) includes(n *graph.Node) string {
 		b.WriteString(d)
 	}
 	return b.String()
+}
+
+// transitiveVcpkgs collects the unique vcpkg deps of a node and its closure.
+func (gen *Generator) transitiveVcpkgs(n *graph.Node) []label.VcpkgDep {
+	var out []label.VcpkgDep
+	seen := map[string]bool{}
+	var walk func(*graph.Node)
+	walk = func(node *graph.Node) {
+		for _, v := range node.Vcpkgs {
+			key := v.Port + ":" + v.Lib
+			if !seen[key] {
+				seen[key] = true
+				out = append(out, v)
+			}
+		}
+		for _, dep := range node.Deps {
+			walk(dep)
+		}
+	}
+	walk(n)
+	return out
+}
+
+// vcpkgLinkArgs returns the linker arguments for a node's transitive vcpkg deps.
+func (gen *Generator) vcpkgLinkArgs(n *graph.Node) []string {
+	var out []string
+	for _, v := range gen.transitiveVcpkgs(n) {
+		out = append(out, gen.Vcpkg.LibArg(v.Lib))
+	}
+	return out
 }
 
 // transitiveLibs returns the archive paths of all cc_library deps (dependents
@@ -335,8 +372,9 @@ func (gen *Generator) transitiveSyslibs(n *graph.Node) []string {
 	return out
 }
 
-// linkArgs renders the archive + system-library portion of the link command.
-func (gen *Generator) linkArgs(libs, syslibs []string) string {
+// linkArgs renders the archive + system-library + vcpkg portion of the link
+// command. `extra` (vcpkg archive paths / -l flags) is appended after the group.
+func (gen *Generator) linkArgs(libs, syslibs, extra []string) string {
 	var parts []string
 	if len(libs) > 0 && gen.Tc.GroupsLibraries() {
 		parts = append(parts, "-Wl,--start-group")
@@ -348,6 +386,7 @@ func (gen *Generator) linkArgs(libs, syslibs []string) string {
 	for _, s := range syslibs {
 		parts = append(parts, "-l"+s)
 	}
+	parts = append(parts, extra...)
 	return strings.Join(parts, " ")
 }
 

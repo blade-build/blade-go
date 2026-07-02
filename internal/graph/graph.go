@@ -15,8 +15,9 @@ import (
 // Node is a target plus its resolved dependencies.
 type Node struct {
 	Target  *target.Target
-	Deps    []*Node       // resolved non-syslib dependencies
-	Syslibs []label.Label // "#name" system-library dependencies
+	Deps    []*Node          // resolved non-syslib dependencies
+	Syslibs []label.Label    // "#name" system-library dependencies
+	Vcpkgs  []label.VcpkgDep // "vcpkg#port:lib" thirdparty dependencies
 }
 
 // Label returns the node's canonical label.
@@ -99,6 +100,10 @@ func (b *Builder) resolve(lbl label.Label) (*Node, error) {
 	b.graph.order = append(b.graph.order, n)
 
 	for _, dep := range tgt.AttrStrings("deps") {
+		if label.IsVcpkg(dep) {
+			n.Vcpkgs = append(n.Vcpkgs, label.ParseVcpkg(dep))
+			continue
+		}
 		dlbl, err := label.Parse(dep, tgt.Package)
 		if err != nil {
 			return nil, fmt.Errorf("%s: dep %q: %w", lbl, dep, err)

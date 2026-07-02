@@ -32,6 +32,25 @@ func (l Label) String() string {
 // IsSyslib reports whether l refers to a system library ("#name").
 func (l Label) IsSyslib() bool { return l.Package == SyslibPackage }
 
+// VcpkgDep is a parsed "vcpkg#<port>:<lib>" dependency.
+type VcpkgDep struct {
+	Port string
+	Lib  string
+}
+
+// IsVcpkg reports whether a dep string uses the vcpkg scheme.
+func IsVcpkg(s string) bool { return strings.HasPrefix(s, "vcpkg#") }
+
+// ParseVcpkg parses "vcpkg#<port>" (lib defaults to port) or
+// "vcpkg#<port>:<lib>".
+func ParseVcpkg(s string) VcpkgDep {
+	body := strings.TrimPrefix(s, "vcpkg#")
+	if i := strings.LastIndex(body, ":"); i >= 0 {
+		return VcpkgDep{Port: body[:i], Lib: body[i+1:]}
+	}
+	return VcpkgDep{Port: body, Lib: body}
+}
+
 // Parse resolves a dep string relative to currentPkg.
 func Parse(s, currentPkg string) (Label, error) {
 	s = strings.TrimSpace(s)

@@ -10,6 +10,7 @@ import (
 	"github.com/blade-build/blade-go/internal/graph"
 	"github.com/blade-build/blade-go/internal/loader"
 	"github.com/blade-build/blade-go/internal/toolchain"
+	"github.com/blade-build/blade-go/internal/vcpkg"
 )
 
 func buildGraph(t *testing.T, files map[string]string, roots ...string) (*graph.Graph, string) {
@@ -261,5 +262,95 @@ cc_binary(name = 'app', srcs = ['hello.cc'], deps = [':mk'])
 	}
 	if strings.TrimSpace(string(o)) != "gen-ok" {
 		t.Errorf("output=%q", strings.TrimSpace(string(o)))
+	}
+}
+
+func TestVcpkgLinkFlags(t *testing.T) {
+	vroot := t.TempDir()
+	installed := filepath.Join(vroot, "installed", "x64-linux")
+	if err := os.MkdirAll(filepath.Join(installed, "lib"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(installed, "lib", "libfoo.a"), nil, 0o644); err != nil {
+		t.Fatal(err)
+	}
+	g, _ := buildGraph(t, map[string]string{
+		"app/BUILD": `cc_binary(name = 'app', srcs = ['main.cc'], deps = ['vcpkg#foo'])`,
+	}, "//app:app")
+	gen := New(toolchain.Detect())
+	gen.Vcpkg = &vcpkg.Resolver{Root: vroot, Triplet: "x64-linux"}
+	f, err := gen.Generate(g)
+	if err != nil {
+		t.Fatal(err)
+	}
+	out := f.String()
+	if !strings.Contains(out, "-I"+filepath.Join(installed, "include")) {
+		t.Errorf("compile missing vcpkg include dir\n%s", out)
+	}
+	if !strings.Contains(out, filepath.Join(installed, "lib", "libfoo.a")) {
+		t.Errorf("link missing vcpkg archive\n%s", out)
+	}
+}
+
+func TestEndToEndVcpkg(t *testing.T) {
+	if _, err := exec.LookPath("ninja"); err != nil {
+		t.Skip("ninja not available")
+	}
+	tc := toolchain.Detect()
+	if _, err := exec.LookPath(tc.CXX); err != nil {
+		t.Skip("C++ compiler not available")
+	}
+	if _, err := exec.LookPath(tc.AR); err != nil {
+		t.Skip("ar not available")
+	}
+
+	// Build a fake vcpkg tree with a real static library.
+	vroot := t.TempDir()
+	installed := filepath.Join(vroot, "installed", "test-triplet")
+	inc := filepath.Join(installed, "include")
+	libdir := filepath.Join(installed, "lib")
+	for _, d := range []string{inc, libdir} {
+		if err := os.MkdirAll(d, 0o755); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if err := os.WriteFile(filepath.Join(inc, "greeter.h"), []byte("#pragma once\nconst char* greet();\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	src := t.TempDir()
+	greeterC := filepath.Join(src, "greeter.cc")
+	os.WriteFile(greeterC, []byte(`#include "greeter.h"`+"\nconst char* greet(){ return \"vcpkg-ok\"; }\n"), 0o644)
+	obj := filepath.Join(src, "greeter.o")
+	if o, err := exec.Command(tc.CXX, "-I", inc, "-c", greeterC, "-o", obj).CombinedOutput(); err != nil {
+		t.Fatalf("compiling fake vcpkg lib: %v\n%s", err, o)
+	}
+	if o, err := exec.Command(tc.AR, "rcs", filepath.Join(libdir, "libgreeter.a"), obj).CombinedOutput(); err != nil {
+		t.Fatalf("archiving fake vcpkg lib: %v\n%s", err, o)
+	}
+
+	g, root := buildGraph(t, map[string]string{
+		"app/main.cc": `#include "greeter.h"` + "\n#include <cstdio>\nint main(){ printf(\"%s\\n\", greet()); return 0; }\n",
+		"app/BUILD":   `cc_binary(name = 'app', srcs = ['main.cc'], deps = ['vcpkg#greeter'])`,
+	}, "//app:app")
+	gen := New(tc)
+	gen.Vcpkg = &vcpkg.Resolver{Root: vroot, Triplet: "test-triplet"}
+	f, err := gen.Generate(g)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(root, "build.ninja"), []byte(f.String()), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	cmd := exec.Command("ninja", "-f", "build.ninja", "build64_release/app/app")
+	cmd.Dir = root
+	if o, err := cmd.CombinedOutput(); err != nil {
+		t.Fatalf("ninja: %v\n%s\n%s", err, o, f.String())
+	}
+	o, err := exec.Command(filepath.Join(root, "build64_release/app/app")).CombinedOutput()
+	if err != nil {
+		t.Fatalf("run: %v\n%s", err, o)
+	}
+	if strings.TrimSpace(string(o)) != "vcpkg-ok" {
+		t.Errorf("output=%q, want vcpkg-ok", strings.TrimSpace(string(o)))
 	}
 }
