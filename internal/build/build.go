@@ -146,18 +146,40 @@ func configureVcpkg(gen *cc.Generator, cfg *config.Config, root string) {
 func configureProto(gen *cc.Generator, cfg *config.Config) {
 	for _, s := range cfg.Named("proto_library_config") {
 		if p, ok := s.Attrs["protoc"].(string); ok && p != "" {
+			// `vcpkg#<port>` resolves to the protoc the pinned vcpkg tree
+			// installs (matching the linked libprotobuf), mirroring blade's own
+			// vcpkg# scheme. configureVcpkg has already set InstalledDir.
+			if port, ok := strings.CutPrefix(p, "vcpkg#"); ok {
+				if tp := gen.Vcpkg.ToolPath(port, "protoc"); tp != "" {
+					p = tp
+				}
+			}
 			gen.Protoc = p
 		}
 		if libs, ok := s.Attrs["protobuf_libs"].([]any); ok {
-			var names []string
+			var syslibs []string
+			var vpkgs []label.VcpkgDep
 			for _, l := range libs {
-				if str, ok := l.(string); ok {
-					names = append(names, strings.TrimPrefix(str, "#"))
+				str, ok := l.(string)
+				if !ok {
+					continue
+				}
+				// flare pins protobuf itself in vcpkg ('vcpkg#protobuf:protobuf');
+				// route those through the resolver, not as a bare -l syslib.
+				if rest, ok := strings.CutPrefix(str, "vcpkg#"); ok {
+					port, lib := rest, rest
+					if i := strings.IndexByte(rest, ':'); i >= 0 {
+						port, lib = rest[:i], rest[i+1:]
+					}
+					vpkgs = append(vpkgs, label.VcpkgDep{Port: port, Lib: lib})
+				} else {
+					syslibs = append(syslibs, strings.TrimPrefix(str, "#"))
 				}
 			}
-			if len(names) > 0 {
-				gen.ProtobufLibs = names
-			}
+			// The config is authoritative once protobuf_libs is set: replace the
+			// defaults rather than merging (flare doesn't want -lprotobuf on top).
+			gen.ProtobufLibs = syslibs
+			gen.ProtobufVcpkgs = vpkgs
 		}
 	}
 }

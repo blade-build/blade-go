@@ -81,6 +81,16 @@ func (r *Resolver) LibArg(lib string) string {
 	return "-l" + lib
 }
 
+// ToolPath returns the path to a tool a vcpkg port installs under its tools/
+// subdir, e.g. ToolPath("protobuf", "protoc") -> <installed>/tools/protobuf/
+// protoc. Returns "" when unconfigured.
+func (r *Resolver) ToolPath(port, tool string) string {
+	if !r.Configured() {
+		return ""
+	}
+	return filepath.Join(r.installed(), "tools", port, tool)
+}
+
 // ManifestJSON turns a BLADE_ROOT vcpkg_config into a vcpkg.json manifest so the
 // exact same ports/versions flare pins are installed. `baseline` is the vcpkg
 // builtin baseline commit; `packages` maps a port name to either a version

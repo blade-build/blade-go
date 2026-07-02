@@ -139,6 +139,56 @@ func TestBuildAppliesProtoConfig(t *testing.T) {
 	}
 }
 
+func TestBuildRoutesVcpkgProtobuf(t *testing.T) {
+	// flare pins protobuf in vcpkg: protobuf_libs = ['vcpkg#protobuf:protobuf'].
+	// The proto compile must see the vcpkg include dir, and the link must use the
+	// vcpkg archive -- not a bare -lprotobuf.
+	vroot := t.TempDir()
+	t.Setenv("VCPKG_ROOT", vroot)
+	t.Setenv("VCPKG_DEFAULT_TRIPLET", "test-triplet")
+	inst := filepath.Join(vroot, "installed", "test-triplet")
+	if err := os.MkdirAll(filepath.Join(inst, "lib"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.MkdirAll(filepath.Join(inst, "include"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(inst, "lib", "libprotobuf.a"), nil, 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	root := t.TempDir()
+	files := map[string]string{
+		"BLADE_ROOT": `proto_library_config(protoc = 'protoc', protobuf_libs = ['vcpkg#protobuf:protobuf'])`,
+		"pb/BUILD":   `proto_library(name = 'msg', srcs = ['msg.proto'], visibility = ['PUBLIC'])`,
+		"app/BUILD":  `cc_binary(name = 'app', srcs = ['main.cc'], deps = ['//pb:msg'])`,
+	}
+	for rel, content := range files {
+		p := filepath.Join(root, rel)
+		if err := os.MkdirAll(filepath.Dir(p), 0o755); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(p, []byte(content), 0o644); err != nil {
+			t.Fatal(err)
+		}
+	}
+	ninjaFile, err := Build(root, []string{"//app:app"}, Options{RunNinja: false})
+	if err != nil {
+		t.Fatal(err)
+	}
+	data, _ := os.ReadFile(ninjaFile)
+	out := string(data)
+	if want := filepath.Join(inst, "include"); !strings.Contains(out, want) {
+		t.Errorf("proto compile missing vcpkg include %q:\n%s", want, out)
+	}
+	if want := filepath.Join(inst, "lib", "libprotobuf.a"); !strings.Contains(out, want) {
+		t.Errorf("link missing vcpkg protobuf archive %q:\n%s", want, out)
+	}
+	if strings.Contains(out, "-lprotobuf") {
+		t.Errorf("protobuf should route via vcpkg archive, not -lprotobuf:\n%s", out)
+	}
+}
+
 func TestRunsCcTests(t *testing.T) {
 	if _, err := exec.LookPath("ninja"); err != nil {
 		t.Skip("ninja not available")

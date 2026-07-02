@@ -53,16 +53,19 @@ func TestVisibleTo(t *testing.T) {
 		consumer    Label
 		wantVisible bool
 	}{
-		{nil, "flare/base", lc("flare/base", "other"), true},                        // same package
-		{nil, "flare/base", lc("flare/rpc", "rpc"), false},                          // private, cross-package
-		{[]string{"PUBLIC"}, "flare/base", lc("app", "x"), true},                    // PUBLIC
-		{[]string{"//flare/rpc:rpc"}, "flare/base", lc("flare/rpc", "rpc"), true},   // exact
-		{[]string{"//flare/rpc:rpc"}, "flare/base", lc("flare/rpc", "http"), false}, // exact, wrong name
-		{[]string{"//flare/rpc:*"}, "flare/base", lc("flare/rpc", "http"), true},    // pkg wildcard
-		{[]string{"//flare/rpc:*"}, "flare/base", lc("flare/net", "x"), false},      // wrong pkg
-		{[]string{"//flare/..."}, "flare/base", lc("flare/rpc/detail", "x"), true},  // recursive
-		{[]string{"//flare/..."}, "flare/base", lc("other", "x"), false},            // outside subtree
-		{[]string{"//flare/..."}, "flare/base", lc("flare", "x"), true},             // the root itself
+		{nil, "flare/base", lc("flare/base", "other"), true},                                    // same package
+		{nil, "flare/base", lc("flare/rpc", "rpc"), false},                                      // private, cross-package
+		{[]string{"PUBLIC"}, "flare/base", lc("app", "x"), true},                                // PUBLIC
+		{[]string{"//flare/rpc:rpc"}, "flare/base", lc("flare/rpc", "rpc"), true},               // exact
+		{[]string{"//flare/rpc:rpc"}, "flare/base", lc("flare/rpc", "http"), false},             // exact, wrong name
+		{[]string{"//flare/rpc:*"}, "flare/base", lc("flare/rpc", "http"), true},                // pkg wildcard
+		{[]string{"//flare/rpc:*"}, "flare/base", lc("flare/net", "x"), false},                  // wrong pkg
+		{[]string{"//flare/..."}, "flare/base", lc("flare/rpc/detail", "x"), true},              // recursive
+		{[]string{"//flare/..."}, "flare/base", lc("other", "x"), false},                        // outside subtree
+		{[]string{"//flare/..."}, "flare/base", lc("flare", "x"), true},                         // the root itself
+		{[]string{"//flare/fiber:..."}, "flare/fiber/detail", lc("flare/fiber", "x"), true},     // colon-ellipsis: pkg itself
+		{[]string{"//flare/fiber:..."}, "flare/fiber/detail", lc("flare/fiber/sub", "x"), true}, // colon-ellipsis: subpackage
+		{[]string{"//flare/fiber:..."}, "flare/fiber/detail", lc("flare/rpc", "x"), false},      // colon-ellipsis: outside
 	}
 	for i, tt := range tests {
 		if got := VisibleTo(tt.vis, tt.definePkg, tt.consumer); got != tt.wantVisible {

@@ -89,7 +89,8 @@ func Parse(s, currentPkg string) (Label, error) {
 // its own package; otherwise a pattern must match.
 //
 // Supported patterns: "PUBLIC", "//pkg:name" (exact), "//pkg:*" (any target in
-// pkg), and "//pkg/..." (pkg and all sub-packages).
+// pkg), and "//pkg/..." / "//pkg:..." (pkg and all sub-packages -- flare uses
+// the colon form, e.g. '//flare/fiber:...').
 func VisibleTo(visibility []string, definingPkg string, consumer Label) bool {
 	if consumer.Package == definingPkg {
 		return true
@@ -104,8 +105,12 @@ func VisibleTo(visibility []string, definingPkg string, consumer Label) bool {
 
 func matchVisibility(pattern string, consumer Label) bool {
 	body := strings.TrimPrefix(pattern, "//")
-	if rec, ok := strings.CutSuffix(body, "/..."); ok {
-		return consumer.Package == rec || strings.HasPrefix(consumer.Package, rec+"/")
+	// Recursive subtree: both '//pkg/...' and '//pkg:...' mean pkg and all its
+	// sub-packages (flare writes the colon form).
+	for _, suffix := range []string{"/...", ":..."} {
+		if rec, ok := strings.CutSuffix(body, suffix); ok {
+			return consumer.Package == rec || strings.HasPrefix(consumer.Package, rec+"/")
+		}
 	}
 	if body == "..." {
 		return true
