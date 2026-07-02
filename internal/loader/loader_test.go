@@ -322,6 +322,32 @@ pkg_build(name = 'jsoncpp_build')
 	}
 }
 
+func TestIncludeRelativePath(t *testing.T) {
+	// ctemplate/BUILD uses include('../foreign_build.bld') -- a path relative to
+	// the including file's directory, not workspace-root ("//...").
+	root := workspace(t, map[string]string{
+		"BLADE_ROOT": `cc_config()`,
+		"thirdparty/shared.bld": `
+def make_stamp(name):
+    gen_rule(name = name, outs = [name + '.stamp'], cmd = 'touch $OUTS')
+`,
+		"thirdparty/foo/BUILD": `
+include('../shared.bld')
+make_stamp(name = 'foo_build')
+`,
+	})
+	l := New(root)
+	if err := l.LoadConfigFile(filepath.Join(root, "BLADE_ROOT")); err != nil {
+		t.Fatal(err)
+	}
+	if err := l.LoadBuildFile(filepath.Join(root, "thirdparty/foo/BUILD")); err != nil {
+		t.Fatalf("relative include failed: %v", err)
+	}
+	if g := l.Targets.Get("//thirdparty/foo:foo_build"); g == nil || g.Type != "gen_rule" {
+		t.Fatalf("target from relative-included macro not registered; labels=%v", l.Targets.Labels())
+	}
+}
+
 func TestLoadMissingExtension(t *testing.T) {
 	root := workspace(t, map[string]string{
 		"app/BUILD": `load('//nope/missing.bld', 'x')`,

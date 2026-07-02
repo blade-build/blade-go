@@ -169,7 +169,7 @@ func (l *Loader) exec(pathname, pkg, dir string, pre starlark.StringDict) error 
 	if err != nil {
 		return err
 	}
-	if err := l.applyIncludes(string(src), pre); err != nil {
+	if err := l.applyIncludes(string(src), filepath.Dir(pathname), pre); err != nil {
 		return fmt.Errorf("%s: %w", pathname, err)
 	}
 	thread := &starlark.Thread{Name: pathname, Load: l.loadExtension}
@@ -226,10 +226,10 @@ var includeRe = regexp.MustCompile(`(?m)^\s*include\(\s*['"]([^'"]+)['"]\s*\)`)
 // .bld with the same predeclared environment (so its macros see bare gen_rule,
 // blade, isinstance, ...), and merges the resulting globals into pre. A no-op
 // include builtin satisfies the runtime call itself (the work is done here).
-func (l *Loader) applyIncludes(src string, pre starlark.StringDict) error {
+func (l *Loader) applyIncludes(src, baseDir string, pre starlark.StringDict) error {
 	pre["include"] = noopInclude()
 	for _, m := range includeRe.FindAllStringSubmatch(src, -1) {
-		globals, err := l.includeGlobals(m[1])
+		globals, err := l.includeGlobals(m[1], baseDir)
 		if err != nil {
 			return err
 		}
@@ -240,11 +240,21 @@ func (l *Loader) applyIncludes(src string, pre starlark.StringDict) error {
 	return nil
 }
 
+// resolveInclude maps an include() argument to an absolute path: a "//path" is
+// workspace-root-relative, anything else (e.g. "../foreign_build.bld") is
+// relative to the including file's directory.
+func (l *Loader) resolveInclude(module, baseDir string) string {
+	if rest, ok := strings.CutPrefix(module, "//"); ok {
+		return filepath.Join(l.Root, filepath.FromSlash(rest))
+	}
+	return filepath.Join(baseDir, filepath.FromSlash(module))
+}
+
 // includeGlobals evaluates an included .bld (recursively resolving its own
-// includes) with the full BUILD predeclared environment and returns its globals.
-func (l *Loader) includeGlobals(module string) (starlark.StringDict, error) {
-	rel := strings.TrimPrefix(module, "//")
-	p := filepath.Join(l.Root, filepath.FromSlash(rel))
+// includes, relative to its own directory) with the full BUILD predeclared
+// environment and returns its globals.
+func (l *Loader) includeGlobals(module, baseDir string) (starlark.StringDict, error) {
+	p := l.resolveInclude(module, baseDir)
 	if g, ok := l.incCache[p]; ok {
 		return g, nil
 	}
@@ -253,7 +263,7 @@ func (l *Loader) includeGlobals(module string) (starlark.StringDict, error) {
 		return nil, fmt.Errorf("include(%q): %w", module, err)
 	}
 	pre := l.buildEnv()
-	if err := l.applyIncludes(string(src), pre); err != nil {
+	if err := l.applyIncludes(string(src), filepath.Dir(p), pre); err != nil {
 		return nil, fmt.Errorf("include(%q): %w", module, err)
 	}
 	t := &starlark.Thread{Name: p, Load: l.loadExtension}
