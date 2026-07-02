@@ -14,6 +14,7 @@ import (
 	"path/filepath"
 	"runtime"
 	"sort"
+	"strings"
 )
 
 // Resolver locates headers and archives in a vcpkg installation.
@@ -149,6 +150,87 @@ func parsePackage(v any) (version string, features []string) {
 	return version, features
 }
 
+// cmakeOptions extracts a port's `cmake_options` (Blade's per-port configure
+// flags, e.g. glog's -DGFLAGS_NOTHREADS=OFF). Returns nil for plain-string specs.
+func cmakeOptions(v any) []string {
+	spec, ok := v.(map[string]any)
+	if !ok {
+		return nil
+	}
+	opts, ok := spec["cmake_options"].([]any)
+	if !ok {
+		return nil
+	}
+	var out []string
+	for _, o := range opts {
+		if s, ok := o.(string); ok {
+			out = append(out, s)
+		}
+	}
+	return out
+}
+
+// writeOverlayTriplet materializes an overlay triplet that reuses the base
+// triplet's settings and adds each port's cmake_options as a per-port
+// VCPKG_CMAKE_CONFIGURE_OPTIONS branch (vcpkg triplets can switch on ${PORT}).
+// This is how blade-go applies flare's cmake_options -- vcpkg.json has no
+// per-port configure knob. Returns the overlay dir, or "" if nothing needs it.
+func (r *Resolver) writeOverlayTriplet(packages map[string]any, dir string) (string, error) {
+	perPort := map[string][]string{}
+	for name, spec := range packages {
+		if opts := cmakeOptions(spec); len(opts) > 0 {
+			perPort[name] = opts
+		}
+	}
+	if len(perPort) == 0 {
+		return "", nil
+	}
+	base, err := r.baseTriplet()
+	if err != nil {
+		return "", err
+	}
+	var b strings.Builder
+	b.WriteString(base)
+	b.WriteString("\n# blade-go: per-port cmake_options from vcpkg_config\n")
+	names := make([]string, 0, len(perPort))
+	for name := range perPort {
+		names = append(names, name)
+	}
+	sort.Strings(names)
+	for _, name := range names {
+		fmt.Fprintf(&b, "if(PORT STREQUAL %q)\n", name)
+		for _, opt := range perPort[name] {
+			fmt.Fprintf(&b, "  list(APPEND VCPKG_CMAKE_CONFIGURE_OPTIONS %q)\n", opt)
+		}
+		b.WriteString("endif()\n")
+	}
+	overlay := filepath.Join(dir, "overlay-triplets")
+	if err := os.MkdirAll(overlay, 0o755); err != nil {
+		return "", err
+	}
+	if err := os.WriteFile(filepath.Join(overlay, r.Triplet+".cmake"), []byte(b.String()), 0o644); err != nil {
+		return "", err
+	}
+	return overlay, nil
+}
+
+// baseTriplet returns the built-in triplet file's contents (community/ falls
+// back), so the overlay can extend rather than replace the standard settings.
+func (r *Resolver) baseTriplet() (string, error) {
+	if r.Root == "" {
+		return "", fmt.Errorf("VCPKG_ROOT unset: cannot locate base triplet %s", r.Triplet)
+	}
+	for _, rel := range []string{
+		filepath.Join("triplets", r.Triplet+".cmake"),
+		filepath.Join("triplets", "community", r.Triplet+".cmake"),
+	} {
+		if data, err := os.ReadFile(filepath.Join(r.Root, rel)); err == nil {
+			return string(data), nil
+		}
+	}
+	return "", fmt.Errorf("base triplet %s not found under %s/triplets", r.Triplet, r.Root)
+}
+
 // FindExe locates the vcpkg executable: $VCPKG_ROOT/vcpkg if present, else
 // `vcpkg` on PATH (mirroring blade's own resolution -- CI relies on the runner's
 // preinstalled vcpkg). Returns "" when none is found.
@@ -187,15 +269,30 @@ func (r *Resolver) InstallFromConfig(baseline string, packages map[string]any, m
 		return err
 	}
 	installRoot := filepath.Join(manifestDir, "vcpkg_installed")
-	cmd := exec.Command(exe, "install",
-		"--triplet="+r.Triplet,
-		"--x-manifest-root="+manifestDir,
-		"--x-install-root="+installRoot)
+	args := []string{"install",
+		"--triplet=" + r.Triplet,
+		"--x-manifest-root=" + manifestDir,
+		"--x-install-root=" + installRoot}
+	if overlay, err := r.writeOverlayTriplet(packages, manifestDir); err != nil {
+		return err
+	} else if overlay != "" {
+		args = append(args, "--overlay-triplets="+overlay)
+	}
+	cmd := exec.Command(exe, args...)
 	cmd.Stdout = os.Stderr // progress on stderr; stdout stays clean for callers
 	cmd.Stderr = os.Stderr
-	if err := cmd.Run(); err != nil {
-		return fmt.Errorf("vcpkg install: %w", err)
+	runErr := cmd.Run()
+
+	// Use the pinned tree whenever it materialized, even on a partial failure:
+	// the ports that installed (with their flare-pinned versions) must take
+	// precedence over any stale global $VCPKG_ROOT/installed tree. Falling back
+	// to that would silently undo the whole point of vcpkg_config.
+	tree := filepath.Join(installRoot, r.Triplet)
+	if _, statErr := os.Stat(filepath.Join(tree, "include")); statErr == nil {
+		r.InstalledDir = tree
 	}
-	r.InstalledDir = filepath.Join(installRoot, r.Triplet)
+	if runErr != nil {
+		return fmt.Errorf("vcpkg install: %w", runErr)
+	}
 	return nil
 }

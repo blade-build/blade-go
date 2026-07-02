@@ -5,6 +5,7 @@ import (
 	"os"
 	"path/filepath"
 	"reflect"
+	"strings"
 	"testing"
 )
 
@@ -123,6 +124,62 @@ func TestManifestJSONNoBaseline(t *testing.T) {
 	}
 	if !reflect.DeepEqual(m["dependencies"], []any{"zlib"}) {
 		t.Errorf("dependencies=%v", m["dependencies"])
+	}
+}
+
+func TestWriteOverlayTriplet(t *testing.T) {
+	root := t.TempDir()
+	// A stand-in built-in triplet file.
+	if err := os.MkdirAll(filepath.Join(root, "triplets"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	base := "set(VCPKG_TARGET_ARCHITECTURE arm64)\nset(VCPKG_LIBRARY_LINKAGE static)\n"
+	if err := os.WriteFile(filepath.Join(root, "triplets", "arm64-osx.cmake"), []byte(base), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	r := &Resolver{Root: root, Triplet: "arm64-osx"}
+	packages := map[string]any{
+		"glog":   map[string]any{"cmake_options": []any{"-DGFLAGS_NOTHREADS=OFF"}},
+		"snappy": map[string]any{"cmake_options": []any{"-DSNAPPY_WITH_RTTI=ON"}},
+		"fmt":    "7.1.3", // no cmake_options -> no branch
+	}
+	dir := t.TempDir()
+	overlay, err := r.writeOverlayTriplet(packages, dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if overlay == "" {
+		t.Fatal("expected an overlay dir when cmake_options are present")
+	}
+	got, err := os.ReadFile(filepath.Join(overlay, "arm64-osx.cmake"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	s := string(got)
+	for _, want := range []string{
+		base, // base triplet preserved
+		`if(PORT STREQUAL "glog")`,
+		`list(APPEND VCPKG_CMAKE_CONFIGURE_OPTIONS "-DGFLAGS_NOTHREADS=OFF")`,
+		`if(PORT STREQUAL "snappy")`,
+		`list(APPEND VCPKG_CMAKE_CONFIGURE_OPTIONS "-DSNAPPY_WITH_RTTI=ON")`,
+	} {
+		if !strings.Contains(s, want) {
+			t.Errorf("overlay triplet missing %q\n---\n%s", want, s)
+		}
+	}
+	if strings.Contains(s, `STREQUAL "fmt"`) {
+		t.Error("port without cmake_options should not get a branch")
+	}
+}
+
+func TestWriteOverlayTripletNoOptions(t *testing.T) {
+	r := &Resolver{Root: t.TempDir(), Triplet: "arm64-osx"}
+	overlay, err := r.writeOverlayTriplet(map[string]any{"fmt": "7.1.3"}, t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if overlay != "" {
+		t.Errorf("no cmake_options should mean no overlay, got %q", overlay)
 	}
 }
 
