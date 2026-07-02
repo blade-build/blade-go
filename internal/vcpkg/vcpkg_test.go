@@ -1,8 +1,10 @@
 package vcpkg
 
 import (
+	"encoding/json"
 	"os"
 	"path/filepath"
+	"reflect"
 	"testing"
 )
 
@@ -45,6 +47,90 @@ func TestUnconfigured(t *testing.T) {
 	var nilR *Resolver
 	if nilR.Configured() {
 		t.Error("nil resolver should be unconfigured")
+	}
+}
+
+func TestManifestJSON(t *testing.T) {
+	// Mirrors flare's vcpkg_config: plain-string versions, {'version': ...}
+	// dicts, and a features dict. The Blade-only keys (link_all_symbols,
+	// cmake_options) must be ignored -- they aren't part of vcpkg.json.
+	packages := map[string]any{
+		"fmt":      "7.1.3",
+		"protobuf": map[string]any{"version": "3.21.12"},
+		"gflags":   map[string]any{"version": "2.2.2", "link_all_symbols": true},
+		"openssl":  map[string]any{},
+		"curl":     map[string]any{"features": []any{"openssl", "http2"}},
+	}
+	out, err := ManifestJSON("06a7fdd564234908731c59ac46a624f808e87b1c", packages)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var m map[string]any
+	if err := json.Unmarshal(out, &m); err != nil {
+		t.Fatalf("manifest is not valid JSON: %v\n%s", err, out)
+	}
+
+	if m["builtin-baseline"] != "06a7fdd564234908731c59ac46a624f808e87b1c" {
+		t.Errorf("baseline=%v", m["builtin-baseline"])
+	}
+
+	// dependencies: sorted; plain ports are strings, curl carries its features.
+	deps := m["dependencies"].([]any)
+	var names []string
+	var curl map[string]any
+	for _, d := range deps {
+		switch v := d.(type) {
+		case string:
+			names = append(names, v)
+		case map[string]any:
+			names = append(names, v["name"].(string))
+			if v["name"] == "curl" {
+				curl = v
+			}
+		}
+	}
+	if want := []string{"curl", "fmt", "gflags", "openssl", "protobuf"}; !reflect.DeepEqual(names, want) {
+		t.Errorf("dependency names=%v, want sorted %v", names, want)
+	}
+	if curl == nil || !reflect.DeepEqual(curl["features"], []any{"openssl", "http2"}) {
+		t.Errorf("curl features not carried through: %v", curl)
+	}
+
+	// overrides: one per explicitly-versioned port (openssl/curl have none).
+	got := map[string]string{}
+	for _, o := range m["overrides"].([]any) {
+		ov := o.(map[string]any)
+		got[ov["name"].(string)] = ov["version"].(string)
+	}
+	want := map[string]string{"fmt": "7.1.3", "protobuf": "3.21.12", "gflags": "2.2.2"}
+	if !reflect.DeepEqual(got, want) {
+		t.Errorf("overrides=%v, want %v", got, want)
+	}
+}
+
+func TestManifestJSONNoBaseline(t *testing.T) {
+	out, err := ManifestJSON("", map[string]any{"zlib": map[string]any{}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	var m map[string]any
+	json.Unmarshal(out, &m)
+	if _, ok := m["builtin-baseline"]; ok {
+		t.Error("no baseline should omit builtin-baseline")
+	}
+	if _, ok := m["overrides"]; ok {
+		t.Error("no versions should omit overrides")
+	}
+	if !reflect.DeepEqual(m["dependencies"], []any{"zlib"}) {
+		t.Errorf("dependencies=%v", m["dependencies"])
+	}
+}
+
+func TestInstalledDirOverride(t *testing.T) {
+	dir := t.TempDir()
+	r := &Resolver{Root: "/opt/vcpkg", Triplet: "arm64-osx", InstalledDir: dir}
+	if got, want := r.IncludeDir(), filepath.Join(dir, "include"); got != want {
+		t.Errorf("IncludeDir=%q, want manifest-tree %q", got, want)
 	}
 }
 

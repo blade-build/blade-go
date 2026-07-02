@@ -116,6 +116,31 @@ func configureTestLibs(gen *cc.Generator, cfg *config.Config) {
 	}
 }
 
+// configureVcpkg reads BLADE_ROOT's vcpkg_config (baseline + pinned packages)
+// and installs those exact ports via vcpkg manifest mode, pointing the resolver
+// at the resulting tree. This is what lets blade-go build flare against the same
+// thirdparty versions its Python-Blade build uses (fmt 7.1.3, protobuf 3.21.12,
+// ...) rather than whatever a bare `vcpkg install <port>` gives today.
+//
+// Best-effort: with no vcpkg_config, or no vcpkg executable, it leaves the
+// env-derived resolver untouched (so fixtures and simple setups are unaffected).
+func configureVcpkg(gen *cc.Generator, cfg *config.Config, root string) {
+	pkgsV, ok := cfg.GetItem("vcpkg_config", "packages")
+	if !ok {
+		return
+	}
+	packages, ok := pkgsV.(map[string]any)
+	if !ok || len(packages) == 0 {
+		return
+	}
+	baseline, _ := cfg.GetItem("vcpkg_config", "baseline")
+	baselineStr, _ := baseline.(string)
+	manifestDir := filepath.Join(root, gen.BuildDir, ".blade-go-vcpkg")
+	if err := gen.Vcpkg.InstallFromConfig(baselineStr, packages, manifestDir); err != nil {
+		fmt.Fprintf(os.Stderr, "blade-go: vcpkg_config install skipped: %v\n", err)
+	}
+}
+
 // configureProto applies proto_library_config (protoc path, protobuf_libs) to
 // the generator. Non-string / lambda values are ignored, keeping the defaults.
 func configureProto(gen *cc.Generator, cfg *config.Config) {
@@ -175,6 +200,7 @@ func plan(root string, targets []string) (*graph.Graph, *cc.Generator, *ninja.Fi
 		return nil, nil, nil, err
 	}
 	gen := cc.New(toolchain.Detect())
+	configureVcpkg(gen, l.Config, root)
 	configureProto(gen, l.Config)
 	configureCcFlags(gen, l.Config)
 	configureTestLibs(gen, l.Config)

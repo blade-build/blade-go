@@ -54,7 +54,8 @@ known.
 | 8d | differential harness vs Python Blade (ninja parser + CI-wired) | ✅ |
 | 8e | cc_config compile flags via config-lambda evaluation | ✅ |
 | 8f | cc_test links cc_test_config test framework (gtest via vcpkg) | ✅ |
-| 8g | full flare compile (blocked on thirdparty *versions* in vcpkg) | ⬜ |
+| 8g | read BLADE_ROOT `vcpkg_config`: install flare-pinned ports (fmt 7.1.3, protobuf 3.21.12, ...) via a generated vcpkg manifest | ✅ |
+| 8h | full flare compile against the pinned tree | ⬜ |
 
 Each phase is one PR, merged after CI is green.
 
