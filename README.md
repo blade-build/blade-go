@@ -40,8 +40,8 @@ known.
 
 | Phase | What | Status |
 | --- | --- | --- |
-| 0 | Scaffold: repo, CI+coverage, Starlark toolchain wired | ✅ (this commit) |
-| 1 | Load & config: BUILD/BLADE_ROOT eval, `blade` context, config schema, lambdas, `glob`/`load`/`fail`/`enable_if` | ⬜ |
+| 0 | Scaffold: repo, CI+coverage, Starlark toolchain wired | ✅ |
+| 1 | Load & config: BUILD/BLADE_ROOT eval, `blade` context, config capture, lambdas, `glob`/`fail`/`enable_if`/`load_value` | ✅ |
 | 2 | Graph & analysis: target model, dep expansion, visibility, topo sort | ⬜ |
 | 3 | cc core → ninja: compile/ar/link, includes, syslibs, toolchain flags | ⬜ |
 | 4 | `proto_library` (protoc C++ codegen + ordering) | ⬜ |
@@ -51,6 +51,10 @@ known.
 | 8 | Full flare build + conformance capstone | ⬜ |
 
 Each phase is one PR, merged after CI is green.
+
+Phase 1 status: loads flare's real `BLADE_ROOT` (lambdas, `blade` context,
+`load_value`) and **76 of 86** flare BUILD files (602 targets). The remaining 10
+need `load()`/`include()` (custom-rule machinery, Phase 5) and `build_target`.
 
 ## Testing
 
