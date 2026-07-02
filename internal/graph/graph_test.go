@@ -127,3 +127,45 @@ cc_library(name = 'right', deps = ['//base:base'], visibility = ['PUBLIC'])
 		t.Fatalf("graph nodes=%d, want 4 (base shared once): %v", g.Len(), names(g.All()))
 	}
 }
+
+func TestThirdpartyRoutesToVcpkg(t *testing.T) {
+	// A //thirdparty/... dep resolves to a vcpkg dep without loading its BUILD.
+	l := workspace(t, map[string]string{
+		"app/BUILD": `cc_binary(name = 'app', srcs = ['m.cc'], deps = ['//thirdparty/googletest:gtest', '//thirdparty/gflags:gflags'])`,
+		// note: no thirdparty/*/BUILD files exist -- they must not be loaded.
+	})
+	g, err := NewBuilder(l).Build([]string{"//app:app"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	app := g.Node("//app:app")
+	if len(app.Vcpkgs) != 2 {
+		t.Fatalf("app.Vcpkgs=%+v, want 2", app.Vcpkgs)
+	}
+	got := map[string]string{}
+	for _, v := range app.Vcpkgs {
+		got[v.Port] = v.Lib
+	}
+	if got["googletest"] != "gtest" || got["gflags"] != "gflags" {
+		t.Errorf("vcpkg mapping wrong: %+v", app.Vcpkgs)
+	}
+	if g.Len() != 1 { // only //app:app; thirdparty packages were not loaded
+		t.Errorf("graph loaded thirdparty BUILDs: %v", names(g.All()))
+	}
+}
+
+func TestVcpkgPrefixDisabled(t *testing.T) {
+	l := workspace(t, map[string]string{
+		"app/BUILD":               `cc_binary(name = 'app', deps = ['//thirdparty/gflags:gflags'])`,
+		"thirdparty/gflags/BUILD": `cc_library(name = 'gflags', srcs = ['g.cc'], visibility = ['PUBLIC'])`,
+	})
+	b := NewBuilder(l)
+	b.VcpkgPrefix = "" // disable mapping -> load the real BUILD
+	g, err := b.Build([]string{"//app:app"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if g.Node("//thirdparty/gflags:gflags") == nil {
+		t.Error("with mapping disabled, the thirdparty target should load normally")
+	}
+}
