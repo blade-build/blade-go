@@ -51,7 +51,7 @@ func newRootCmd() *cobra.Command {
 		SilenceErrors: false,
 	}
 	root.CompletionOptions.DisableDefaultCmd = true
-	root.AddCommand(newBuildCmd(), newTestCmd(), newRunCmd(), newCleanCmd())
+	root.AddCommand(newBuildCmd(), newTestCmd(), newRunCmd(), newCleanCmd(), newQueryCmd())
 	return root
 }
 
@@ -217,6 +217,46 @@ func newRunCmd() *cobra.Command {
 		},
 	}
 	bf.register(c)
+	return c
+}
+
+func newQueryCmd() *cobra.Command {
+	var deps, dependents, depended bool
+	c := &cobra.Command{
+		Use:   "query [--deps | --dependents] <target>...",
+		Short: "Show a target's transitive dependencies (--deps) or dependents",
+		Args:  cobra.MinimumNArgs(1),
+		RunE: func(cmd *cobra.Command, targets []string) error {
+			reverse := dependents || depended
+			// --deps is the default when neither direction is given.
+			root, err := workspaceRoot()
+			if err != nil {
+				return err
+			}
+			results, err := build.Query(root, targets, reverse)
+			if err != nil {
+				return err
+			}
+			arrow := "depends on"
+			if reverse {
+				arrow = "depended on by"
+			}
+			for _, r := range results {
+				fmt.Printf("%s %s:\n", r.Target, arrow)
+				for _, d := range r.Related {
+					fmt.Printf("  %s\n", d)
+				}
+				if len(r.Related) == 0 {
+					fmt.Println("  (none)")
+				}
+			}
+			return nil
+		},
+	}
+	c.Flags().BoolVar(&deps, "deps", false, "show transitive dependencies (default)")
+	c.Flags().BoolVar(&dependents, "dependents", false, "show transitive dependents (reverse)")
+	c.Flags().BoolVar(&depended, "depended", false, "alias of --dependents")
+	c.FParseErrWhitelist.UnknownFlags = true
 	return c
 }
 

@@ -128,6 +128,7 @@ blade build --no-build //flare/...                 # front-end only (no ninja)
 blade test -k //flare/base/...                      # run every cc_test in the tree
 blade run //flare/example/rpc:server -- --port 80   # build + run; args after -- go to it
 blade clean                                         # remove the build output dir
+blade query --deps //flare/base:logging             # transitive deps (--dependents for reverse)
 ```
 
 | flag | effect |
