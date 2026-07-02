@@ -20,6 +20,9 @@ type Generator struct {
 	Protoc       string          // protoc executable (proto_library codegen)
 	ProtobufLibs []string        // system libs a proto_library pulls in (bare names)
 	Vcpkg        *vcpkg.Resolver // resolves vcpkg#port:lib thirdparty deps
+	Cppflags     []string        // cc_config flags for all C-family compiles
+	Cxxflags     []string        // cc_config flags for C++ compiles only
+	Cflags       []string        // cc_config flags for C compiles only
 }
 
 // New returns a Generator with the default build dir and protobuf settings.
@@ -54,6 +57,9 @@ func (gen *Generator) Generate(g *graph.Graph) (*ninja.File, error) {
 	f.SetVar("ar", gen.Tc.AR)
 	f.SetVar("protoc", gen.Protoc)
 	f.SetVar("builddir", gen.BuildDir)
+	f.SetVar("cppflags", strings.Join(gen.Cppflags, " "))
+	f.SetVar("cxxflags", strings.Join(gen.Cxxflags, " "))
+	f.SetVar("cflags", strings.Join(gen.Cflags, " "))
 	gen.emitRules(f)
 
 	libOf := map[*graph.Node]string{}
@@ -95,11 +101,11 @@ func (gen *Generator) Generate(g *graph.Graph) (*ninja.File, error) {
 func (gen *Generator) emitRules(f *ninja.File) {
 	f.AddRule(ninja.Rule{
 		Name: "cc", Description: "CC ${out}", Depfile: "${out}.d", Deps: "gcc",
-		Command: "${cc} -MMD -MF ${out}.d ${cflags} ${includes} -c ${in} -o ${out}",
+		Command: "${cc} -MMD -MF ${out}.d ${cppflags} ${cflags} ${includes} -c ${in} -o ${out}",
 	})
 	f.AddRule(ninja.Rule{
 		Name: "cxx", Description: "CXX ${out}", Depfile: "${out}.d", Deps: "gcc",
-		Command: "${cxx} -MMD -MF ${out}.d ${cxxflags} ${includes} -c ${in} -o ${out}",
+		Command: "${cxx} -MMD -MF ${out}.d ${cppflags} ${cxxflags} ${includes} -c ${in} -o ${out}",
 	})
 	f.AddRule(ninja.Rule{
 		Name: "ar", Description: "AR ${out}",

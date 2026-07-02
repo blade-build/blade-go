@@ -163,13 +163,15 @@ func TestEndToEndProto(t *testing.T) {
 			t.Skip("protobuf not registered with pkg-config")
 		}
 	}
+	// Compile/link against the installed protobuf runtime: C++17 + pkg-config
+	// cflags go through the generator's Cxxflags; ldflags are prepended below.
+	cflags, lflags := pkgConfig(t, "protobuf")
+	gen.Cxxflags = append([]string{"-std=c++17"}, strings.Fields(cflags)...)
 	f, err := gen.Generate(g)
 	if err != nil {
 		t.Fatal(err)
 	}
-	// Inject protobuf compile/link flags (pkg-config) as global ninja vars.
-	cflags, lflags := pkgConfig(t, "protobuf")
-	ninjaText := "cxxflags = -std=c++17 " + cflags + "\nldflags = " + lflags + "\n" + f.String()
+	ninjaText := "ldflags = " + lflags + "\n" + f.String()
 	if err := os.WriteFile(filepath.Join(root, "build.ninja"), []byte(ninjaText), 0o644); err != nil {
 		t.Fatal(err)
 	}

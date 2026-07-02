@@ -9,6 +9,9 @@ import (
 	"path/filepath"
 	"strings"
 
+	"go.starlark.net/starlark"
+
+	"github.com/blade-build/blade-go/internal/bladectx"
 	"github.com/blade-build/blade-go/internal/cc"
 	"github.com/blade-build/blade-go/internal/config"
 	"github.com/blade-build/blade-go/internal/graph"
@@ -17,6 +20,71 @@ import (
 	"github.com/blade-build/blade-go/internal/ninja"
 	"github.com/blade-build/blade-go/internal/toolchain"
 )
+
+// configureCcFlags resolves cc_config's compile flags (cppflags/cxxflags/cflags/
+// extra_incs) and applies them to the generator. Config values may be
+// `lambda blade: [...]` callables (flare's idiom); they are evaluated here with a
+// build-phase blade context. Evaluation is best-effort -- a lambda that needs
+// something we don't model is skipped rather than failing the build.
+func configureCcFlags(gen *cc.Generator, cfg *config.Config) {
+	blade := bladectx.BuildModule("", gen.BuildDir, cfg)
+	cpp := evalConfigList(cfg, "cc_config", "cppflags", blade)
+	for _, d := range evalConfigList(cfg, "cc_config", "extra_incs", blade) {
+		cpp = append(cpp, "-I"+d)
+	}
+	gen.Cppflags = cpp
+	gen.Cxxflags = evalConfigList(cfg, "cc_config", "cxxflags", blade)
+	gen.Cflags = evalConfigList(cfg, "cc_config", "cflags", blade)
+}
+
+// evalConfigList returns a config list item as []string, evaluating a lambda
+// (called with `blade`) if that's how it was written. Empty strings are dropped
+// (flare emits `'-flag' if cond else ”`).
+func evalConfigList(cfg *config.Config, section, item string, blade starlark.Value) []string {
+	v, ok := cfg.GetItem(section, item)
+	if !ok {
+		return nil
+	}
+	if callable, ok := v.(starlark.Callable); ok {
+		res, err := starlark.Call(&starlark.Thread{Name: "config"}, callable, starlark.Tuple{blade}, nil)
+		if err != nil {
+			return nil
+		}
+		return starlarkStrings(res)
+	}
+	return goStrings(v)
+}
+
+func starlarkStrings(v starlark.Value) []string {
+	it, ok := v.(starlark.Iterable)
+	if !ok {
+		return nil
+	}
+	iter := it.Iterate()
+	defer iter.Done()
+	var out []string
+	var e starlark.Value
+	for iter.Next(&e) {
+		if s, ok := starlark.AsString(e); ok && s != "" {
+			out = append(out, s)
+		}
+	}
+	return out
+}
+
+func goStrings(v any) []string {
+	list, ok := v.([]any)
+	if !ok {
+		return nil
+	}
+	var out []string
+	for _, e := range list {
+		if s, ok := e.(string); ok && s != "" {
+			out = append(out, s)
+		}
+	}
+	return out
+}
 
 // configureProto applies proto_library_config (protoc path, protobuf_libs) to
 // the generator. Non-string / lambda values are ignored, keeping the defaults.
@@ -78,6 +146,7 @@ func plan(root string, targets []string) (*graph.Graph, *cc.Generator, *ninja.Fi
 	}
 	gen := cc.New(toolchain.Detect())
 	configureProto(gen, l.Config)
+	configureCcFlags(gen, l.Config)
 	f, err := gen.Generate(g)
 	if err != nil {
 		return nil, nil, nil, err
