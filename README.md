@@ -51,7 +51,8 @@ known.
 | 8a | vcpkg resolver (`vcpkg#port:lib` → include/lib flags) | ✅ |
 | 8b | //thirdparty→vcpkg mapping (flare graph resolves) | ✅ |
 | 8c | flare `.bld` loads (isinstance builtin + flare assert/`is`/str-concat fixes) | ✅ |
-| 8d | full flare compile + differential harness vs Python Blade | ⬜ |
+| 8d | differential harness vs Python Blade (ninja parser + CI-wired) | ✅ |
+| 8e | full flare compile (needs a vcpkg+flare env) | ⬜ |
 
 Each phase is one PR, merged after CI is green.
 

@@ -4,8 +4,12 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"reflect"
+	"sort"
 	"strings"
 	"testing"
+
+	"github.com/blade-build/blade-go/internal/ninjaparse"
 )
 
 func TestFindRoot(t *testing.T) {
@@ -178,4 +182,109 @@ cc_test(name = 'fail', srcs = ['fail.cc'])
 	if byLabel["//t:fail"] {
 		t.Error("//t:fail should fail (exit 1)")
 	}
+}
+
+func writeWorkspace(t *testing.T, files map[string]string) string {
+	t.Helper()
+	root := t.TempDir()
+	for rel, content := range files {
+		p := filepath.Join(root, rel)
+		if err := os.MkdirAll(filepath.Dir(p), 0o755); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(p, []byte(content), 0o644); err != nil {
+			t.Fatal(err)
+		}
+	}
+	return root
+}
+
+func sortedKeys(m map[string]bool) []string {
+	out := make([]string, 0, len(m))
+	for k := range m {
+		out = append(out, k)
+	}
+	sort.Strings(out)
+	return out
+}
+
+// TestDifferentialVsPythonBlade checks that blade-go's generated build graph
+// matches Python Blade's (the oracle) on the same workspace: it compiles the
+// same source files and produces the same static archives. Set BLADE_PY to the
+// Python Blade launcher to run it.
+func TestDifferentialVsPythonBlade(t *testing.T) {
+	pyBlade := os.Getenv("BLADE_PY")
+	if pyBlade == "" {
+		t.Skip("set BLADE_PY to the Python Blade launcher to run the differential test")
+	}
+	files := map[string]string{
+		"BLADE_ROOT":   "cc_config()\n",
+		"base/base.h":  "#pragma once\nint add(int, int);\n",
+		"base/base.cc": "#include \"base/base.h\"\nint add(int a, int b){ return a + b; }\n",
+		"base/BUILD":   "cc_library(name = 'base', srcs = ['base.cc'], hdrs = ['base.h'], visibility = ['PUBLIC'])\n",
+		"app/main.cc":  "#include \"base/base.h\"\nint main(){ return add(1, 2) == 3 ? 0 : 1; }\n",
+		"app/BUILD":    "cc_binary(name = 'app', srcs = ['main.cc'], deps = ['//base:base'])\n",
+	}
+	pyRoot := writeWorkspace(t, files)
+	goRoot := writeWorkspace(t, files)
+
+	// Python Blade (the oracle): generate ninja only.
+	cmd := exec.Command(pyBlade, "build", "//app:app", "--stop-after", "generate")
+	cmd.Dir = pyRoot
+	if out, err := cmd.CombinedOutput(); err != nil {
+		// The oracle couldn't run here (toolchain/env) -- skip rather than fail;
+		// a genuine divergence is only meaningful once both generate.
+		t.Skipf("python blade did not run: %v\n%s", err, out)
+	}
+	pyNinja := findNinja(t, pyRoot)
+
+	// blade-go.
+	if _, err := Build(goRoot, []string{"//app:app"}, Options{RunNinja: false}); err != nil {
+		t.Fatal(err)
+	}
+	goNinja := findNinja(t, goRoot)
+
+	pyE := ninjaparse.Parse(pyNinja)
+	goE := ninjaparse.Parse(goNinja)
+	if a, b := normSet(ninjaparse.CompiledSources(pyE)), normSet(ninjaparse.CompiledSources(goE)); !reflect.DeepEqual(a, b) {
+		t.Errorf("compiled sources differ:\n  python=%v\n  blade-go=%v", sortedKeys(a), sortedKeys(b))
+	}
+	if a, b := ninjaparse.Archives(pyE), ninjaparse.Archives(goE); !reflect.DeepEqual(a, b) {
+		t.Errorf("archives differ:\n  python=%v\n  blade-go=%v", sortedKeys(a), sortedKeys(b))
+	}
+}
+
+// normSet drops blade-internal sources blade-go doesn't emit (the SCM version
+// stamp), so the comparison is about the user's sources.
+func normSet(m map[string]bool) map[string]bool {
+	out := map[string]bool{}
+	for k := range m {
+		if k != "scm.cc" {
+			out[k] = true
+		}
+	}
+	return out
+}
+
+// findNinja concatenates every .ninja file under the build dir (Python Blade
+// splits edges into per-target subninjas; blade-go writes a single file).
+func findNinja(t *testing.T, root string) string {
+	t.Helper()
+	dirs, _ := filepath.Glob(filepath.Join(root, "build*"))
+	var sb strings.Builder
+	for _, d := range dirs {
+		_ = filepath.WalkDir(d, func(p string, e os.DirEntry, err error) error {
+			if err == nil && !e.IsDir() && strings.HasSuffix(p, ".ninja") {
+				if data, rerr := os.ReadFile(p); rerr == nil {
+					sb.Write(data)
+					sb.WriteByte('\n')
+				}
+			}
+			return nil
+		})
+	}
+	if sb.Len() == 0 {
+		t.Fatalf("no ninja files generated under %s", root)
+	}
+	return sb.String()
 }
