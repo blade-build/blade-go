@@ -43,7 +43,7 @@ known.
 | 0 | Scaffold: repo, CI+coverage, Starlark toolchain wired | ✅ |
 | 1 | Load & config: BUILD/BLADE_ROOT eval, `blade` context, config capture, lambdas, `glob`/`fail`/`enable_if`/`load_value` | ✅ |
 | 2 | Graph & analysis: dep expansion, visibility, topo sort | ✅ |
-| 3 | cc core → ninja: compile/ar/link, includes, syslibs, toolchain flags | ⬜ |
+| 3 | cc core → ninja: compile/ar/link, includes, syslibs, toolchain; `blade build` CLI | ✅ |
 | 4 | `proto_library` (protoc C++ codegen + ordering) | ⬜ |
 | 5 | Custom rules (`define_rule`) + `cc_flare_library` | ⬜ |
 | 6 | foreign / thirdparty (or vcpkg) | ⬜ |
@@ -76,4 +76,8 @@ go build ./...
 go test ./...
 ```
 
-Requires Go 1.25+.
+Requires Go 1.25+ (and, for the cc end-to-end test, `ninja` + a C++ compiler).
+
+As of Phase 3, `blade build //pkg:target` works for cc targets: it finds
+BLADE_ROOT, resolves the graph, generates `build64_release/build.ninja`, and runs
+ninja to produce the binary/archive.
