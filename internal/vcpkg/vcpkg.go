@@ -71,12 +71,16 @@ func (r *Resolver) IncludeDir() string {
 }
 
 // LibArg returns the linker argument for a library: the static archive path if
-// it exists in the vcpkg tree, otherwise a plain `-l<lib>`.
+// it exists in the vcpkg tree, otherwise a plain `-l<lib>`. Archives that define
+// a `main` (gtest_main, gmock_main) are placed under lib/manual-link/ by vcpkg
+// so they aren't auto-linked; check there too.
 func (r *Resolver) LibArg(lib string) string {
 	if r.Configured() {
-		archive := filepath.Join(r.installed(), "lib", "lib"+lib+".a")
-		if _, err := os.Stat(archive); err == nil {
-			return archive
+		for _, sub := range []string{"lib", filepath.Join("lib", "manual-link")} {
+			archive := filepath.Join(r.installed(), sub, "lib"+lib+".a")
+			if _, err := os.Stat(archive); err == nil {
+				return archive
+			}
 		}
 	}
 	return "-l" + lib

@@ -59,6 +59,7 @@ known.
 | 8i | RPC graph: `legacy_public_targets`, header self-sufficiency (C++), vcpkg `include_prefix`, `resource_library` codegen | ✅ |
 | 8j | **`//flare/rpc:rpc` — the full flare RPC library — compiles end-to-end** | ✅ |
 | 8k | **`//flare/example/rpc:server` — a full RPC server binary links & runs** (cc_flare_library codegen, header-check separation, pkg-config -framework) | ✅ |
+| 8l | **`blade test` runs flare's cc_tests** (gtest via vcpkg manual-link) — endian/chrono/enum/string tests PASS | ✅ |
 
 Each phase is one PR, merged after CI is green.
 
