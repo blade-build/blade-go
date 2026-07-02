@@ -5,8 +5,10 @@ package graph
 
 import (
 	"fmt"
+	"io/fs"
 	"os"
 	"path/filepath"
+	"sort"
 	"strings"
 
 	"github.com/blade-build/blade-go/internal/label"
@@ -116,6 +118,105 @@ func (b *Builder) vcpkgFromThirdparty(lbl label.Label) (label.VcpkgDep, bool) {
 		port = rest[:i]
 	}
 	return label.VcpkgDep{Port: port, Lib: lbl.Name}, true
+}
+
+// Expand turns target patterns into concrete labels:
+//   - "//pkg:*" / "//pkg:all"  -> every target in pkg
+//   - "//pkg/..." / "//pkg:..." -> every target in pkg and its sub-packages
+//   - "//..."                   -> every target in the workspace
+//
+// A plain "//pkg:name" passes through unchanged. Loads the BUILD files it needs.
+func (b *Builder) Expand(patterns []string) ([]string, error) {
+	var out []string
+	for _, p := range patterns {
+		switch {
+		case isRecursivePattern(p):
+			base := recursiveBase(p)
+			pkgs, err := b.packagesUnder(base)
+			if err != nil {
+				return nil, err
+			}
+			for _, pkg := range pkgs {
+				out = append(out, b.targetsIn(pkg)...)
+			}
+		case isPackageWildcard(p):
+			pkg := packageOf(p)
+			if err := b.ensurePackage(pkg); err != nil {
+				return nil, err
+			}
+			out = append(out, b.targetsIn(pkg)...)
+		default:
+			out = append(out, p)
+		}
+	}
+	return out, nil
+}
+
+func isRecursivePattern(p string) bool {
+	return p == "//..." || strings.HasSuffix(p, "/...") || strings.HasSuffix(p, ":...")
+}
+
+func recursiveBase(p string) string {
+	body := strings.TrimPrefix(p, "//")
+	for _, suffix := range []string{"/...", ":..."} {
+		if base, ok := strings.CutSuffix(body, suffix); ok {
+			return base
+		}
+	}
+	return "" // "..."
+}
+
+func isPackageWildcard(p string) bool {
+	return strings.HasSuffix(p, ":*") || strings.HasSuffix(p, ":all")
+}
+
+func packageOf(p string) string {
+	body := strings.TrimPrefix(p, "//")
+	if i := strings.LastIndexByte(body, ':'); i >= 0 {
+		return body[:i]
+	}
+	return body
+}
+
+// packagesUnder returns every package (dir with a BUILD file) at or below base.
+func (b *Builder) packagesUnder(base string) ([]string, error) {
+	root := b.loader.Root
+	if base != "" {
+		root = filepath.Join(root, filepath.FromSlash(base))
+	}
+	var pkgs []string
+	err := filepath.WalkDir(root, func(p string, d fs.DirEntry, err error) error {
+		if err != nil {
+			return nil // skip unreadable dirs
+		}
+		if d.IsDir() {
+			if _, e := os.Stat(filepath.Join(p, "BUILD")); e == nil {
+				rel, _ := filepath.Rel(b.loader.Root, p)
+				pkg := filepath.ToSlash(rel)
+				if pkg == "." {
+					pkg = ""
+				}
+				if err := b.ensurePackage(pkg); err != nil {
+					return err
+				}
+				pkgs = append(pkgs, pkg)
+			}
+		}
+		return nil
+	})
+	return pkgs, err
+}
+
+// targetsIn returns the labels of all targets registered in pkg, sorted.
+func (b *Builder) targetsIn(pkg string) []string {
+	var out []string
+	for _, t := range b.loader.Targets.All() {
+		if t.Package == pkg {
+			out = append(out, t.Label())
+		}
+	}
+	sort.Strings(out)
+	return out
 }
 
 // Build resolves the transitive closure of the given root labels and returns the

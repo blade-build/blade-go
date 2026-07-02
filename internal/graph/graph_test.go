@@ -3,6 +3,7 @@ package graph
 import (
 	"os"
 	"path/filepath"
+	"reflect"
 	"testing"
 
 	"github.com/blade-build/blade-go/internal/loader"
@@ -122,6 +123,48 @@ func TestLegacyPublicTargets(t *testing.T) {
 	}
 	if _, err := NewBuilder(l2).Build([]string{"//app:app"}); err == nil {
 		t.Fatal("expected a visibility error without legacy_public_targets")
+	}
+}
+
+func TestExpandPatterns(t *testing.T) {
+	l := workspace(t, map[string]string{
+		"flare/base/BUILD": `
+cc_library(name = 'a', visibility = ['PUBLIC'])
+cc_library(name = 'b', visibility = ['PUBLIC'])
+`,
+		"flare/base/sub/BUILD": `cc_library(name = 'c', visibility = ['PUBLIC'])`,
+		"other/BUILD":          `cc_library(name = 'x')`,
+	})
+	b := NewBuilder(l)
+
+	// Package wildcard: only flare/base's own targets.
+	got, err := b.Expand([]string{"//flare/base:*"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if want := []string{"//flare/base:a", "//flare/base:b"}; !reflect.DeepEqual(got, want) {
+		t.Errorf(":* expand=%v, want %v", got, want)
+	}
+
+	// Recursive: flare/base and its sub-packages.
+	got, err = b.Expand([]string{"//flare/base/..."})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if want := []string{"//flare/base:a", "//flare/base:b", "//flare/base/sub:c"}; !reflect.DeepEqual(got, want) {
+		t.Errorf("/... expand=%v, want %v", got, want)
+	}
+
+	// Colon-ellipsis is the same recursive form.
+	got, _ = b.Expand([]string{"//flare/base:..."})
+	if len(got) != 3 {
+		t.Errorf(":... expand=%v, want 3 targets", got)
+	}
+
+	// A concrete label passes through unchanged.
+	got, _ = b.Expand([]string{"//other:x"})
+	if !reflect.DeepEqual(got, []string{"//other:x"}) {
+		t.Errorf("concrete label expand=%v", got)
 	}
 }
 
