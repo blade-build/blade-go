@@ -176,6 +176,14 @@ func (gen *Generator) emitGenRule(f *ninja.File, n *graph.Node, genFilesOf map[*
 			srcs = append(srcs, path.Join(pkg, s))
 		}
 	}
+	// Order after every dep gen_rule, even ones wired only through `deps` (not
+	// srcs): autotools_build's make step depends on the configure step via deps
+	// alone, and must not run before configure writes the Makefile.
+	for _, dep := range n.Deps {
+		for _, op := range genFilesOf[dep] {
+			implicit = append(implicit, op)
+		}
+	}
 	outMap := map[string]string{}
 	var outs []string
 	for _, o := range n.Target.AttrStrings("outs") {
