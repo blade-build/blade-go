@@ -7,6 +7,7 @@ package main
 import (
 	"fmt"
 	"os"
+	"runtime/pprof"
 
 	"github.com/blade-build/blade-go/internal/build"
 	"github.com/blade-build/blade-go/internal/resource"
@@ -14,6 +15,11 @@ import (
 )
 
 func main() {
+	if p := os.Getenv("BLADE_CPUPROFILE"); p != "" {
+		f, _ := os.Create(p)
+		pprof.StartCPUProfile(f)
+		defer pprof.StopCPUProfile()
+	}
 	// Hidden codegen subcommands invoked from generated ninja edges
 	// (resource_library), mirroring blade's builtin_command architecture.
 	if len(os.Args) >= 2 && (os.Args[1] == "__gen-resource" || os.Args[1] == "__gen-resource-index") {
