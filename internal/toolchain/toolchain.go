@@ -75,3 +75,14 @@ func (t *Toolchain) BinName(name string) string {
 // GroupsLibraries reports whether user archives must be wrapped in a link group
 // to resolve inter-archive ordering (GNU ld). Apple ld64 re-scans, so no.
 func (t *Toolchain) GroupsLibraries() bool { return t.OS == "linux" }
+
+// ForceLoad returns the linker flags that force every object of an archive to be
+// linked (blade's link_all_symbols) -- needed when a lib's static initializers
+// (gflags/glog flag registration, protobuf descriptors) must run even though
+// nothing references them. macOS uses -force_load; GNU ld uses --whole-archive.
+func (t *Toolchain) ForceLoad(archive string) []string {
+	if t.OS == "darwin" {
+		return []string{"-Wl,-force_load," + archive}
+	}
+	return []string{"-Wl,--whole-archive", archive, "-Wl,--no-whole-archive"}
+}
