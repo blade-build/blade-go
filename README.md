@@ -55,7 +55,9 @@ known.
 | 8e | cc_config compile flags via config-lambda evaluation | ✅ |
 | 8f | cc_test links cc_test_config test framework (gtest via vcpkg) | ✅ |
 | 8g | read BLADE_ROOT `vcpkg_config`: install flare-pinned ports (fmt 7.1.3, protobuf 3.21.12, ...) via a generated vcpkg manifest | ✅ |
-| 8h | full flare compile against the pinned tree | ⬜ |
+| 8h | source-built thirdparty: `include()`, `cmake_build` (jsoncpp) + `autotools_build` (ctemplate) via `foreign_cc_library` | ✅ |
+| 8i | RPC graph: `legacy_public_targets`, header self-sufficiency (C++), vcpkg `include_prefix`, `resource_library` codegen | ✅ |
+| 8j | **`//flare/rpc:rpc` — the full flare RPC library — compiles end-to-end** | ✅ |
 
 Each phase is one PR, merged after CI is green.
 
