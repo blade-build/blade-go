@@ -70,3 +70,15 @@ func TestVisibleTo(t *testing.T) {
 		}
 	}
 }
+
+func TestVcpkg(t *testing.T) {
+	if !IsVcpkg("vcpkg#gflags") || IsVcpkg("//x:y") {
+		t.Fatal("IsVcpkg detection wrong")
+	}
+	if got := ParseVcpkg("vcpkg#gflags"); got.Port != "gflags" || got.Lib != "gflags" {
+		t.Errorf("ParseVcpkg(vcpkg#gflags)=%+v", got)
+	}
+	if got := ParseVcpkg("vcpkg#protobuf:protobuf-lite"); got.Port != "protobuf" || got.Lib != "protobuf-lite" {
+		t.Errorf("ParseVcpkg with lib=%+v", got)
+	}
+}

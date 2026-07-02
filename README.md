@@ -48,7 +48,8 @@ known.
 | 5 | Custom-rule extensions: `load()` + `native.*` macros + `blade.config.get_item` (the `cc_flare_library` pattern) | ✅ |
 | 6 | `gen_rule` ninja backend + generated-source resolution + `build_target` | ✅ |
 | 7 | `cc_test` execution + `blade test` CLI | ✅ |
-| 8 | thirdparty via **vcpkg** + full flare build + differential harness | ⬜ |
+| 8a | vcpkg resolver (`vcpkg#port:lib` → include/lib flags) | ✅ |
+| 8b | full flare build + differential harness vs Python Blade | ⬜ |
 
 Each phase is one PR, merged after CI is green.
 
