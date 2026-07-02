@@ -85,6 +85,10 @@ func BuildModule(pkg, buildDir string, cfg ConfigGetter) starlark.Value {
 	members["current_source_dir"] = dirBuiltin("blade.current_source_dir", pkg)
 	members["current_target_dir"] = dirBuiltin("blade.current_target_dir", path.Join(buildDir, pkg))
 	members["config"] = configModule(cfg)
+	members["build_type"] = starlark.String("release")
+	members["build_type_is_debug"] = starlark.NewBuiltin("blade.build_type_is_debug", func(_ *starlark.Thread, b *starlark.Builtin, args starlark.Tuple, kwargs []starlark.Tuple) (starlark.Value, error) {
+		return starlark.False, nil
+	})
 	return starlarkstruct.FromStringDict(starlarkstruct.Default, members)
 }
 

@@ -288,3 +288,29 @@ func findNinja(t *testing.T, root string) string {
 	}
 	return sb.String()
 }
+
+func TestBuildAppliesCcConfigFlags(t *testing.T) {
+	root := writeWorkspace(t, map[string]string{
+		"BLADE_ROOT": `
+cc_config(
+    cxxflags = ['-std=c++17'],
+    cppflags = lambda blade: ['-DFOO', '-mx' if blade.cc_toolchain.target_arch == 'nope' else ''],
+    extra_incs = ['/opt/x/include'],
+)`,
+		"p/BUILD": `cc_library(name = 'p', srcs = ['p.cc'])`,
+	})
+	ninjaFile, err := Build(root, []string{"//p:p"}, Options{RunNinja: false})
+	if err != nil {
+		t.Fatal(err)
+	}
+	data, _ := os.ReadFile(ninjaFile)
+	out := string(data)
+	for _, want := range []string{
+		"cxxflags = -std=c++17",
+		"cppflags = -DFOO -I/opt/x/include", // lambda evaluated, '' dropped, extra_incs -> -I
+	} {
+		if !strings.Contains(out, want) {
+			t.Errorf("missing %q in:\n%s", want, out)
+		}
+	}
+}
