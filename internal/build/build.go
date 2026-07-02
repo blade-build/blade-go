@@ -208,18 +208,23 @@ type Options struct {
 }
 
 // plan loads the workspace and produces the graph, generator, and ninja file for
-// the given targets.
-func plan(root string, targets []string) (*graph.Graph, *cc.Generator, *ninja.File, error) {
+// the given targets (patterns are expanded to concrete labels, also returned).
+func plan(root string, targets []string) (*graph.Graph, *cc.Generator, *ninja.File, []string, error) {
 	l := loader.New(root)
 	bladeRoot := filepath.Join(root, "BLADE_ROOT")
 	if _, err := os.Stat(bladeRoot); err == nil {
 		if err := l.LoadConfigFile(bladeRoot); err != nil {
-			return nil, nil, nil, fmt.Errorf("BLADE_ROOT: %w", err)
+			return nil, nil, nil, nil, fmt.Errorf("BLADE_ROOT: %w", err)
 		}
 	}
-	g, err := graph.NewBuilder(l).Build(targets)
+	b := graph.NewBuilder(l)
+	expanded, err := b.Expand(targets)
 	if err != nil {
-		return nil, nil, nil, err
+		return nil, nil, nil, nil, err
+	}
+	g, err := b.Build(expanded)
+	if err != nil {
+		return nil, nil, nil, nil, err
 	}
 	gen := cc.New(toolchain.Detect())
 	if exe, err := os.Executable(); err == nil {
@@ -231,9 +236,9 @@ func plan(root string, targets []string) (*graph.Graph, *cc.Generator, *ninja.Fi
 	configureTestLibs(gen, l.Config)
 	f, err := gen.Generate(g)
 	if err != nil {
-		return nil, nil, nil, err
+		return nil, nil, nil, nil, err
 	}
-	return g, gen, f, nil
+	return g, gen, f, expanded, nil
 }
 
 func writeNinja(root string, gen *cc.Generator, f *ninja.File) (string, error) {
@@ -262,7 +267,7 @@ func runNinja(root, buildFile string, extraArgs ...string) error {
 // Build loads the workspace, generates the ninja file for the given targets, and
 // (optionally) runs ninja. It returns the path of the generated ninja file.
 func Build(root string, targets []string, opt Options) (string, error) {
-	_, gen, f, err := plan(root, targets)
+	_, gen, f, _, err := plan(root, targets)
 	if err != nil {
 		return "", err
 	}
@@ -288,7 +293,7 @@ type TestResult struct {
 // Test builds the given targets and runs each that is a cc_test, returning one
 // result per test target (in request order).
 func Test(root string, targets []string) ([]TestResult, error) {
-	g, gen, f, err := plan(root, targets)
+	g, gen, f, expanded, err := plan(root, targets)
 	if err != nil {
 		return nil, err
 	}
@@ -300,7 +305,7 @@ func Test(root string, targets []string) ([]TestResult, error) {
 		return nil, err
 	}
 	var results []TestResult
-	for _, r := range targets {
+	for _, r := range expanded {
 		lbl, err := label.Parse(r, "")
 		if err != nil {
 			return nil, err
