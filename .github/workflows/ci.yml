@@ -18,8 +18,8 @@ jobs:
         with:
           go-version: '1.25'
 
-      - name: Install ninja  # for the cc end-to-end build test (gcc/g++ preinstalled)
-        run: sudo apt-get update && sudo apt-get install -y ninja-build
+      - name: Install build tools  # cc/proto end-to-end tests (gcc/g++ preinstalled)
+        run: sudo apt-get update && sudo apt-get install -y ninja-build protobuf-compiler libprotobuf-dev pkg-config
 
       - name: Build
         run: go build ./...

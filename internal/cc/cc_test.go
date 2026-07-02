@@ -102,3 +102,103 @@ func TestEndToEndBuild(t *testing.T) {
 		t.Fatalf("binary output = %q, want hi-from-cc", strings.TrimSpace(string(out)))
 	}
 }
+
+func TestGenerateProtoStructure(t *testing.T) {
+	g, _ := buildGraph(t, map[string]string{
+		"pb/BUILD":  `proto_library(name = 'msg', srcs = ['msg.proto'], visibility = ['PUBLIC'])`,
+		"app/BUILD": `cc_binary(name = 'app', srcs = ['main.cc'], deps = ['//pb:msg'])`,
+	}, "//app:app")
+
+	f, err := New(toolchain.Detect()).Generate(g)
+	if err != nil {
+		t.Fatal(err)
+	}
+	out := f.String()
+	wants := []string{
+		"build build64_release/pb/msg.pb.cc build64_release/pb/msg.pb.h: protoc pb/msg.proto",
+		"build build64_release/pb/msg.pb.cc.o: cxx build64_release/pb/msg.pb.cc | build64_release/pb/msg.pb.h",
+		"build build64_release/pb/libmsg.a: ar build64_release/pb/msg.pb.cc.o",
+		"build64_release/pb/msg.pb.h", // consumer compile gets the generated header as an implicit dep
+		"-lprotobuf",                  // proto pulls in the protobuf runtime for the link
+	}
+	for _, w := range wants {
+		if !strings.Contains(out, w) {
+			t.Errorf("generated ninja missing %q\n---\n%s", w, out)
+		}
+	}
+	// The consumer's own compile lists the generated header as an implicit dep.
+	if !strings.Contains(out, "build build64_release/app/app.objs/main.cc.o: cxx app/main.cc | build64_release/pb/msg.pb.h") {
+		t.Errorf("consumer compile missing generated-header implicit dep\n%s", out)
+	}
+}
+
+func TestEndToEndProto(t *testing.T) {
+	if _, err := exec.LookPath("ninja"); err != nil {
+		t.Skip("ninja not available")
+	}
+	protoc, err := exec.LookPath("protoc")
+	if err != nil {
+		t.Skip("protoc not available")
+	}
+	tc := toolchain.Detect()
+
+	g, root := buildGraph(t, map[string]string{
+		"pb/item.proto": "syntax = \"proto3\";\npackage demo;\nmessage Item { string name = 1; int32 qty = 2; }\n",
+		"pb/BUILD":      `proto_library(name = 'item', srcs = ['item.proto'], visibility = ['PUBLIC'])`,
+		"app/main.cc": `#include "pb/item.pb.h"` + "\n#include <cstdio>\n" +
+			"int main(){ demo::Item i; i.set_name(\"widget\"); i.set_qty(7);\n" +
+			" printf(\"%s:%d\\n\", i.name().c_str(), i.qty()); return 0; }\n",
+		"app/BUILD": `cc_binary(name = 'app', srcs = ['main.cc'], deps = ['//pb:item'])`,
+	}, "//app:app")
+
+	gen := New(tc)
+	gen.Protoc = protoc
+	// Discover protobuf include/lib flags via pkg-config when available, so the
+	// generated code compiles/links against the installed runtime.
+	if pc, err := exec.LookPath("pkg-config"); err == nil {
+		if out, e := exec.Command(pc, "--exists", "protobuf").CombinedOutput(); e == nil {
+			_ = out
+		} else {
+			t.Skip("protobuf not registered with pkg-config")
+		}
+	}
+	f, err := gen.Generate(g)
+	if err != nil {
+		t.Fatal(err)
+	}
+	// Inject protobuf compile/link flags (pkg-config) as global ninja vars.
+	cflags, lflags := pkgConfig(t, "protobuf")
+	ninjaText := "cxxflags = -std=c++17 " + cflags + "\nldflags = " + lflags + "\n" + f.String()
+	if err := os.WriteFile(filepath.Join(root, "build.ninja"), []byte(ninjaText), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	cmd := exec.Command("ninja", "-f", "build.ninja", "build64_release/app/app")
+	cmd.Dir = root
+	if out, err := cmd.CombinedOutput(); err != nil {
+		t.Fatalf("ninja build failed: %v\n%s", err, out)
+	}
+	out, err := exec.Command(filepath.Join(root, "build64_release/app/app")).CombinedOutput()
+	if err != nil {
+		t.Fatalf("run: %v\n%s", err, out)
+	}
+	if strings.TrimSpace(string(out)) != "widget:7" {
+		t.Fatalf("binary output=%q, want widget:7", strings.TrimSpace(string(out)))
+	}
+}
+
+func pkgConfig(t *testing.T, pkg string) (cflags, libs string) {
+	t.Helper()
+	pc, err := exec.LookPath("pkg-config")
+	if err != nil {
+		t.Skip("pkg-config not available")
+	}
+	c, err := exec.Command(pc, "--cflags", pkg).Output()
+	if err != nil {
+		t.Skipf("pkg-config --cflags %s: %v", pkg, err)
+	}
+	l, err := exec.Command(pc, "--libs", pkg).Output()
+	if err != nil {
+		t.Skipf("pkg-config --libs %s: %v", pkg, err)
+	}
+	return strings.TrimSpace(string(c)), strings.TrimSpace(string(l))
+}

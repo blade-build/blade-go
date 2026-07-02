@@ -104,3 +104,33 @@ func TestBuildRunsNinja(t *testing.T) {
 		t.Errorf("binary output=%q", strings.TrimSpace(string(out)))
 	}
 }
+
+func TestBuildAppliesProtoConfig(t *testing.T) {
+	root := t.TempDir()
+	files := map[string]string{
+		"BLADE_ROOT": `proto_library_config(protoc = '/custom/protoc', protobuf_libs = ['#protobuf', '#pthread'])`,
+		"pb/BUILD":   `proto_library(name = 'msg', srcs = ['msg.proto'], visibility = ['PUBLIC'])`,
+		"app/BUILD":  `cc_binary(name = 'app', srcs = ['main.cc'], deps = ['//pb:msg'])`,
+	}
+	for rel, content := range files {
+		p := filepath.Join(root, rel)
+		if err := os.MkdirAll(filepath.Dir(p), 0o755); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(p, []byte(content), 0o644); err != nil {
+			t.Fatal(err)
+		}
+	}
+	ninjaFile, err := Build(root, []string{"//app:app"}, Options{RunNinja: false})
+	if err != nil {
+		t.Fatal(err)
+	}
+	data, _ := os.ReadFile(ninjaFile)
+	out := string(data)
+	if !strings.Contains(out, "protoc = /custom/protoc") {
+		t.Errorf("configured protoc not applied:\n%s", out)
+	}
+	if !strings.Contains(out, "-lprotobuf") || !strings.Contains(out, "-lpthread") {
+		t.Errorf("configured protobuf_libs not applied:\n%s", out)
+	}
+}
