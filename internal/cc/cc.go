@@ -15,18 +15,20 @@ import (
 
 // Generator turns a resolved graph into a ninja file.
 type Generator struct {
-	Tc             *toolchain.Toolchain
-	BuildDir       string           // build output dir (e.g. "build64_release")
-	Self           string           // path to the blade-go binary (resource_library codegen)
-	Protoc         string           // protoc executable (proto_library codegen)
-	ProtobufLibs   []string         // system libs a proto_library pulls in (bare names)
-	ProtobufVcpkgs []label.VcpkgDep // protobuf libs pinned in vcpkg (flare's idiom)
-	Vcpkg          *vcpkg.Resolver  // resolves vcpkg#port:lib thirdparty deps
-	Cppflags       []string         // cc_config flags for all C-family compiles
-	Cxxflags       []string         // cc_config flags for C++ compiles only
-	Cflags         []string         // cc_config flags for C compiles only
-	TestVcpkgs     []label.VcpkgDep // cc_test_config gtest libs that resolve to vcpkg
-	TestSyslibs    []string         // cc_test_config gtest libs that are #-syslibs
+	Tc               *toolchain.Toolchain
+	BuildDir         string           // build output dir (e.g. "build64_release")
+	Self             string           // path to the blade-go binary (resource_library codegen)
+	Protoc           string           // protoc executable (proto_library codegen)
+	ProtobufLibs     []string         // system libs a proto_library pulls in (bare names)
+	ProtobufVcpkgs   []label.VcpkgDep // protobuf libs pinned in vcpkg (flare's idiom)
+	Vcpkg            *vcpkg.Resolver  // resolves vcpkg#port:lib thirdparty deps
+	Cppflags         []string         // cc_config flags for all C-family compiles
+	Cxxflags         []string         // cc_config flags for C++ compiles only
+	Cflags           []string         // cc_config flags for C compiles only
+	TestVcpkgs       []label.VcpkgDep // cc_test_config gtest libs that resolve to vcpkg
+	TestSyslibs      []string         // cc_test_config gtest libs that are #-syslibs
+	BenchmarkVcpkgs  []label.VcpkgDep // cc_config benchmark libs that resolve to vcpkg
+	BenchmarkSyslibs []string         // cc_config benchmark libs that are #-syslibs
 
 	foreignIncs map[*graph.Node][]string // include dirs exported by foreign_cc_library nodes
 
@@ -136,13 +138,19 @@ func (gen *Generator) Generate(g *graph.Graph) (*ninja.File, error) {
 					vcpkgArgs = append(vcpkgArgs, gen.Vcpkg.LibArg(v.Lib))
 				}
 			}
-			// cc_test / cc_benchmark link the configured test framework
-			// (cc_test_config gtest_libs / gtest_main_libs).
-			if n.Target.Type == "cc_test" || n.Target.Type == "cc_benchmark" {
+			// cc_test / cc_benchmark link their configured framework: gtest
+			// (cc_test_config) for tests, google-benchmark (cc_config) for benches.
+			switch n.Target.Type {
+			case "cc_test":
 				for _, v := range gen.TestVcpkgs {
 					vcpkgArgs = append(vcpkgArgs, gen.Vcpkg.LibArg(v.Lib))
 				}
 				syslibs = uniqueStrings(append(syslibs, gen.TestSyslibs...))
+			case "cc_benchmark":
+				for _, v := range gen.BenchmarkVcpkgs {
+					vcpkgArgs = append(vcpkgArgs, gen.Vcpkg.LibArg(v.Lib))
+				}
+				syslibs = uniqueStrings(append(syslibs, gen.BenchmarkSyslibs...))
 			}
 			// Extra link flags the pinned ports declare (macOS -framework for
 			// curl's TLS backend). Only needed once vcpkg archives are linked.
@@ -481,8 +489,11 @@ func (gen *Generator) includes(n *graph.Node) string {
 	}
 	walk(n)
 	needVcpkg := len(gen.transitiveVcpkgs(n)) > 0
-	if (n.Target.Type == "cc_test" || n.Target.Type == "cc_benchmark") && len(gen.TestVcpkgs) > 0 {
-		needVcpkg = true // the test framework's headers (gtest) live in the vcpkg tree
+	if n.Target.Type == "cc_test" && len(gen.TestVcpkgs) > 0 {
+		needVcpkg = true // gtest headers live in the vcpkg tree
+	}
+	if n.Target.Type == "cc_benchmark" && len(gen.BenchmarkVcpkgs) > 0 {
+		needVcpkg = true // google-benchmark headers live in the vcpkg tree
 	}
 	if len(gen.ProtobufVcpkgs) > 0 && (n.Target.Type == "proto_library" || gen.hasProtoInClosure(n)) {
 		needVcpkg = true // protobuf headers (for generated .pb.cc) live in the vcpkg tree

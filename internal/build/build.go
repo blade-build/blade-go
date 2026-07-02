@@ -86,19 +86,30 @@ func goStrings(v any) []string {
 	return out
 }
 
-// configureTestLibs resolves cc_test_config's gtest_libs / gtest_main_libs
-// (evaluating a lambda if that's how they're written) and classifies each entry:
-// a "#name" becomes a test syslib, a "thirdparty/<port>:<lib>" becomes a vcpkg
-// test lib. cc_test / cc_benchmark targets link these.
+// configureTestLibs resolves the framework libs a cc_test / cc_benchmark links
+// from config: cc_test_config's gtest_libs / gtest_main_libs for tests, and
+// cc_config's benchmark_libs / benchmark_main_libs for benchmarks. Each entry is
+// classified -- a "#name" is a syslib, a "thirdparty/<port>:<lib>" a vcpkg lib.
 func configureTestLibs(gen *cc.Generator, cfg *config.Config) {
 	blade := bladectx.BuildModule("", gen.BuildDir, cfg)
-	var labels []string
-	labels = append(labels, evalConfigList(cfg, "cc_test_config", "gtest_libs", blade)...)
-	labels = append(labels, evalConfigList(cfg, "cc_test_config", "gtest_main_libs", blade)...)
+	var gtest []string
+	gtest = append(gtest, evalConfigList(cfg, "cc_test_config", "gtest_libs", blade)...)
+	gtest = append(gtest, evalConfigList(cfg, "cc_test_config", "gtest_main_libs", blade)...)
+	gen.TestVcpkgs, gen.TestSyslibs = classifyFrameworkLibs(gtest)
+
+	var bench []string
+	bench = append(bench, evalConfigList(cfg, "cc_config", "benchmark_libs", blade)...)
+	bench = append(bench, evalConfigList(cfg, "cc_config", "benchmark_main_libs", blade)...)
+	gen.BenchmarkVcpkgs, gen.BenchmarkSyslibs = classifyFrameworkLibs(bench)
+}
+
+// classifyFrameworkLibs splits framework lib labels into vcpkg deps
+// ("thirdparty/<port>:<lib>") and syslibs ("#name").
+func classifyFrameworkLibs(labels []string) (vcpkgs []label.VcpkgDep, syslibs []string) {
 	const prefix = "thirdparty/"
 	for _, s := range labels {
 		if strings.HasPrefix(s, "#") {
-			gen.TestSyslibs = append(gen.TestSyslibs, strings.TrimPrefix(s, "#"))
+			syslibs = append(syslibs, strings.TrimPrefix(s, "#"))
 			continue
 		}
 		lbl, err := label.Parse(s, "")
@@ -111,9 +122,10 @@ func configureTestLibs(gen *cc.Generator, cfg *config.Config) {
 			if i := strings.IndexByte(rest, '/'); i >= 0 {
 				port = rest[:i]
 			}
-			gen.TestVcpkgs = append(gen.TestVcpkgs, label.VcpkgDep{Port: port, Lib: lbl.Name})
+			vcpkgs = append(vcpkgs, label.VcpkgDep{Port: port, Lib: lbl.Name})
 		}
 	}
+	return vcpkgs, syslibs
 }
 
 // configureVcpkg reads BLADE_ROOT's vcpkg_config (baseline + pinned packages)

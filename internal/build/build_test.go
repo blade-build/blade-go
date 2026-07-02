@@ -322,6 +322,43 @@ func TestBuildLinkAllSymbols(t *testing.T) {
 	}
 }
 
+func TestBuildBenchmarkLinksBenchmarkLib(t *testing.T) {
+	// A cc_benchmark links cc_config's benchmark_libs (google-benchmark from
+	// vcpkg), not the gtest test framework.
+	vroot := t.TempDir()
+	t.Setenv("VCPKG_ROOT", vroot)
+	t.Setenv("VCPKG_DEFAULT_TRIPLET", "test-triplet")
+	inst := filepath.Join(vroot, "installed", "test-triplet")
+	if err := os.MkdirAll(filepath.Join(inst, "lib"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(inst, "lib", "libbenchmark.a"), nil, 0o644); err != nil {
+		t.Fatal(err)
+	}
+	root := t.TempDir()
+	files := map[string]string{
+		"BLADE_ROOT": `cc_config(benchmark_libs = ['//thirdparty/benchmark:benchmark'])`,
+		"p/BUILD":    `cc_benchmark(name = 'b', srcs = ['b.cc'])`,
+	}
+	for rel, content := range files {
+		fp := filepath.Join(root, rel)
+		if err := os.MkdirAll(filepath.Dir(fp), 0o755); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(fp, []byte(content), 0o644); err != nil {
+			t.Fatal(err)
+		}
+	}
+	ninjaFile, err := Build(root, []string{"//p:b"}, Options{RunNinja: false})
+	if err != nil {
+		t.Fatal(err)
+	}
+	out := string(mustRead(t, ninjaFile))
+	if !strings.Contains(out, filepath.Join(inst, "lib", "libbenchmark.a")) {
+		t.Errorf("cc_benchmark does not link the benchmark archive:\n%s", out)
+	}
+}
+
 func TestRunsCcTests(t *testing.T) {
 	if _, err := exec.LookPath("ninja"); err != nil {
 		t.Skip("ninja not available")
