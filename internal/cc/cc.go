@@ -284,7 +284,10 @@ func (gen *Generator) emitCompiles(f *ninja.File, n *graph.Node, implicitHdrs []
 		}
 		obj := path.Join(gen.BuildDir, n.Target.Package, n.Target.Name+".objs", src) + gen.Tc.ObjSuffix()
 		rule := "cc"
-		if isCXXSource(src) {
+		// Headers are compiled standalone (blade's self-sufficiency check) with
+		// the target's language, which for cc_* is C++ -- they pull in <memory>
+		// and friends. Only a bare .c stays on the C compiler.
+		if isCXXSource(src) || isHeader(src) {
 			rule = "cxx"
 		}
 		f.AddBuild(ninja.Build{
@@ -381,6 +384,10 @@ func (gen *Generator) includes(n *graph.Node) string {
 	}
 	if inc := gen.Vcpkg.IncludeDir(); inc != "" && needVcpkg {
 		dirs = append(dirs, inc)
+		// include_prefix ports (zlib, snappy, ...) resolve "prefix/hdr" here.
+		if gen.Vcpkg.PrefixRoot != "" {
+			dirs = append(dirs, gen.Vcpkg.PrefixRoot)
+		}
 	}
 	var b strings.Builder
 	for i, d := range dirs {
@@ -497,6 +504,17 @@ func (gen *Generator) BinPath(n *graph.Node) string { return gen.binPath(n) }
 
 func isCXXSource(src string) bool {
 	for _, ext := range []string{".cc", ".cpp", ".cxx", ".C", ".c++", ".mm"} {
+		if strings.HasSuffix(src, ext) {
+			return true
+		}
+	}
+	return false
+}
+
+// isHeader reports whether src is a C/C++ header (compiled standalone for
+// self-sufficiency checking). Treated as C++ by emitCompiles.
+func isHeader(src string) bool {
+	for _, ext := range []string{".h", ".hpp", ".hh", ".hxx", ".h++", ".inc"} {
 		if strings.HasSuffix(src, ext) {
 			return true
 		}

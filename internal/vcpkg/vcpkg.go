@@ -22,6 +22,7 @@ type Resolver struct {
 	Root         string // VCPKG_ROOT
 	Triplet      string // e.g. "x64-linux"
 	InstalledDir string // overrides Root/installed/Triplet (manifest-mode install)
+	PrefixRoot   string // include-prefix shim root (for flare's include_prefix ports)
 }
 
 // FromEnv builds a Resolver from $VCPKG_ROOT and $VCPKG_DEFAULT_TRIPLET (falling
@@ -300,9 +301,46 @@ func (r *Resolver) InstallFromConfig(baseline string, packages map[string]any, m
 	tree := filepath.Join(installRoot, r.Triplet)
 	if _, statErr := os.Stat(filepath.Join(tree, "include")); statErr == nil {
 		r.InstalledDir = tree
+		if err := r.buildIncludePrefixes(packages, manifestDir); err != nil {
+			return err
+		}
 	}
 	if runErr != nil {
 		return fmt.Errorf("vcpkg install: %w", runErr)
 	}
+	return nil
+}
+
+// buildIncludePrefixes materializes flare's per-port include_prefix: vcpkg ships
+// headers flat (include/zlib.h), but flare includes them as "zlib/zlib.h". For
+// each port with an include_prefix P, symlink <prefixRoot>/P -> the vcpkg include
+// dir, so `#include "P/hdr"` resolves via -I<prefixRoot>. Sets r.PrefixRoot.
+func (r *Resolver) buildIncludePrefixes(packages map[string]any, manifestDir string) error {
+	var prefixes []string
+	for _, spec := range packages {
+		if m, ok := spec.(map[string]any); ok {
+			if p, ok := m["include_prefix"].(string); ok && p != "" {
+				prefixes = append(prefixes, p)
+			}
+		}
+	}
+	if len(prefixes) == 0 {
+		return nil
+	}
+	root := filepath.Join(manifestDir, "include_prefixes")
+	if err := os.MkdirAll(root, 0o755); err != nil {
+		return err
+	}
+	incDir := filepath.Join(r.InstalledDir, "include")
+	for _, p := range prefixes {
+		link := filepath.Join(root, p)
+		if _, err := os.Lstat(link); err == nil {
+			continue // already linked
+		}
+		if err := os.Symlink(incDir, link); err != nil && !os.IsExist(err) {
+			return err
+		}
+	}
+	r.PrefixRoot = root
 	return nil
 }

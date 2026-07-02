@@ -95,6 +95,36 @@ func TestVisibilityRecursiveAllows(t *testing.T) {
 	}
 }
 
+func TestLegacyPublicTargets(t *testing.T) {
+	// A private target (no visibility) listed in global_config's
+	// legacy_public_targets is visible everywhere (flare's grandfather list, how
+	// //thirdparty/protobuf:protobuf is reachable).
+	l := workspace(t, map[string]string{
+		"BLADE_ROOT":                `global_config(legacy_public_targets = ['thirdparty/protobuf:protobuf'])`,
+		"app/BUILD":                 `cc_binary(name = 'app', deps = ['//thirdparty/protobuf:protobuf'])`,
+		"thirdparty/protobuf/BUILD": `cc_library(name = 'protobuf', srcs = ['p.cc'])`,
+	})
+	if err := l.LoadConfigFile(filepath.Join(l.Root, "BLADE_ROOT")); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := NewBuilder(l).Build([]string{"//app:app"}); err != nil {
+		t.Fatalf("legacy_public_targets should make the dep visible: %v", err)
+	}
+
+	// Without the legacy entry, the same private cross-package dep is an error.
+	l2 := workspace(t, map[string]string{
+		"BLADE_ROOT":                `global_config()`,
+		"app/BUILD":                 `cc_binary(name = 'app', deps = ['//thirdparty/protobuf:protobuf'])`,
+		"thirdparty/protobuf/BUILD": `cc_library(name = 'protobuf', srcs = ['p.cc'])`,
+	})
+	if err := l2.LoadConfigFile(filepath.Join(l2.Root, "BLADE_ROOT")); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := NewBuilder(l2).Build([]string{"//app:app"}); err == nil {
+		t.Fatal("expected a visibility error without legacy_public_targets")
+	}
+}
+
 func TestCycleDetected(t *testing.T) {
 	l := workspace(t, map[string]string{
 		"a/BUILD": `cc_library(name = 'a', deps = ['//b:b'], visibility = ['PUBLIC'])`,
