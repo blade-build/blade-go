@@ -242,6 +242,11 @@ foreign_cc_library(name = 'foo', deps = [':foo_build'], visibility = ['PUBLIC'])
 	if !strings.Contains(out, "-Ibuild64_release/thirdparty/foo/include") {
 		t.Errorf("consumer missing system_export_incs dir:\n%s", out)
 	}
+	// (5) the consumer's COMPILE waits for the foreign build (its archive is an
+	// implicit dep) so the header shims exist -- else it races and misses them.
+	if !strings.Contains(out, "app/m.cc | ") || !strings.Contains(out, "app/m.cc | build64_release/thirdparty/foo/lib/libfoo.a") {
+		t.Errorf("consumer compile not ordered after the foreign build:\n%s", out)
+	}
 }
 
 func mustRead(t *testing.T, p string) []byte {

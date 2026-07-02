@@ -102,6 +102,11 @@ func (gen *Generator) Generate(g *graph.Graph) (*ninja.File, error) {
 			lib, incs := gen.foreignInfo(n, genFilesOf)
 			if lib != "" {
 				libOf[n] = lib
+				// The same gen_rule that builds the archive also writes the header
+				// shims (autotools/cmake _EXPORT_HEADERS). Expose the archive as a
+				// generated-header dep so a consumer's COMPILE waits for it --
+				// otherwise the consumer can race ahead and miss "<pkg>/hdr.h".
+				genHdrsOf[n] = []string{lib}
 			}
 			gen.foreignIncs[n] = incs
 		case n.Target.Type == "proto_library":
@@ -155,6 +160,10 @@ func (gen *Generator) Generate(g *graph.Graph) (*ninja.File, error) {
 			// Extra link flags the pinned ports declare (macOS -framework for
 			// curl's TLS backend). Only needed once vcpkg archives are linked.
 			if len(vcpkgArgs) > 0 {
+				// The same vcpkg archive can arrive from several sources (a
+				// transitive dep, protobuf_libs, gtest_libs); dedup so ld doesn't
+				// warn about "ignoring duplicate libraries".
+				vcpkgArgs = uniqueStrings(vcpkgArgs)
 				vcpkgArgs = append(vcpkgArgs, gen.Vcpkg.LinkExtras()...)
 			}
 			f.AddBuild(ninja.Build{
