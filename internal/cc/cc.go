@@ -164,11 +164,11 @@ func (gen *Generator) Generate(g *graph.Graph) (*ninja.File, error) {
 func (gen *Generator) emitRules(f *ninja.File) {
 	f.AddRule(ninja.Rule{
 		Name: "cc", Description: "CC ${out}", Depfile: "${out}.d", Deps: "gcc",
-		Command: "${cc} -MMD -MF ${out}.d ${cppflags} ${cflags} ${includes} -c ${in} -o ${out}",
+		Command: "${cc} -MMD -MF ${out}.d ${cppflags} ${cflags} ${defs} ${includes} -c ${in} -o ${out}",
 	})
 	f.AddRule(ninja.Rule{
 		Name: "cxx", Description: "CXX ${out}", Depfile: "${out}.d", Deps: "gcc",
-		Command: "${cxx} -MMD -MF ${out}.d ${cppflags} ${cxxflags} ${includes} -c ${in} -o ${out}",
+		Command: "${cxx} -MMD -MF ${out}.d ${cppflags} ${cxxflags} ${defs} ${includes} -c ${in} -o ${out}",
 	})
 	f.AddRule(ninja.Rule{
 		Name: "ar", Description: "AR ${out}",
@@ -373,6 +373,7 @@ func (gen *Generator) foreignInfo(n *graph.Node, genFilesOf map[*graph.Node]map[
 // compilation; a src naming a generated file compiles from its build-dir path.
 func (gen *Generator) emitCompiles(f *ninja.File, n *graph.Node, implicitHdrs []string, genFiles map[string]string) (objs, checkObjs []string) {
 	inc := gen.includes(n)
+	defs := defineFlags(n) // per-target preprocessor defines (cc_test variants)
 	for _, src := range n.Target.AttrStrings("srcs") {
 		srcPath := path.Join(n.Target.Package, src)
 		if gp, ok := genFiles[src]; ok {
@@ -386,10 +387,14 @@ func (gen *Generator) emitCompiles(f *ninja.File, n *graph.Node, implicitHdrs []
 		if isCXXSource(src) || header {
 			rule = "cxx"
 		}
+		vars := map[string]string{"includes": inc}
+		if defs != "" {
+			vars["defs"] = defs
+		}
 		f.AddBuild(ninja.Build{
 			Outputs: []string{obj}, Rule: rule, Inputs: []string{srcPath},
 			Implicit: implicitHdrs,
-			Vars:     map[string]string{"includes": inc},
+			Vars:     vars,
 		})
 		if header {
 			checkObjs = append(checkObjs, obj) // built as a check, never linked
@@ -620,6 +625,20 @@ func isCXXSource(src string) bool {
 		}
 	}
 	return false
+}
+
+// defineFlags returns a target's `defs` as -D flags (flare's cc_test size
+// variants pass e.g. defs = ['BUFFER_BLOCK_SIZE=\"4096\"']).
+func defineFlags(n *graph.Node) string {
+	var b strings.Builder
+	for i, d := range n.Target.AttrStrings("defs") {
+		if i > 0 {
+			b.WriteByte(' ')
+		}
+		b.WriteString("-D")
+		b.WriteString(d)
+	}
+	return b.String()
 }
 
 // isHeader reports whether src is a C/C++ header (compiled standalone for

@@ -311,9 +311,10 @@ func Test(root string, targets []string) ([]TestResult, error) {
 	if err != nil {
 		return nil, err
 	}
-	if err := runNinja(root, buildFile); err != nil {
-		return nil, err
-	}
+	// Keep going past a failed build so every runnable test still gets built and
+	// run -- one target that won't compile shouldn't hide the rest of a sweep.
+	// (Errors are surfaced; a test whose binary is missing is reported failed.)
+	runNinja(root, buildFile, "-k", "0")
 	var results []TestResult
 	for _, r := range expanded {
 		lbl, err := label.Parse(r, "")
