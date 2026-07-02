@@ -9,6 +9,7 @@ import (
 	"os"
 	"path"
 	"path/filepath"
+	"regexp"
 	"sort"
 	"strings"
 
@@ -26,6 +27,7 @@ import (
 var ruleNames = []string{
 	"cc_library", "cc_binary", "cc_test", "cc_benchmark",
 	"proto_library", "resource_library", "gen_rule",
+	"foreign_cc_library",
 }
 
 // thread-local keys for the currently-executing BUILD file's context.
@@ -64,6 +66,7 @@ type Loader struct {
 	Config   *config.Config
 
 	extCache map[string]starlark.StringDict // load()'ed extensions by path
+	incCache map[string]starlark.StringDict // include()'ed .bld globals by path
 }
 
 // New returns a Loader rooted at the given workspace directory.
@@ -78,6 +81,7 @@ func New(root string) *Loader {
 		Targets:  target.NewRegistry(),
 		Config:   config.New(),
 		extCache: map[string]starlark.StringDict{},
+		incCache: map[string]starlark.StringDict{},
 	}
 }
 
@@ -165,6 +169,9 @@ func (l *Loader) exec(pathname, pkg, dir string, pre starlark.StringDict) error 
 	if err != nil {
 		return err
 	}
+	if err := l.applyIncludes(string(src), pre); err != nil {
+		return fmt.Errorf("%s: %w", pathname, err)
+	}
 	thread := &starlark.Thread{Name: pathname, Load: l.loadExtension}
 	thread.SetLocal(threadPkg, pkg)
 	thread.SetLocal(threadDir, dir)
@@ -207,6 +214,61 @@ func (l *Loader) loadExtension(_ *starlark.Thread, module string) (starlark.Stri
 	}
 	l.extCache[p] = globals
 	return globals, nil
+}
+
+// includeRe matches blade's include('//path.bld') directive. Blade's include()
+// splices a .bld's top-level defs into the calling file's namespace (unlike the
+// selective load()), so we pre-scan for it and merge those globals into the
+// predeclared environment before the file is compiled.
+var includeRe = regexp.MustCompile(`(?m)^\s*include\(\s*['"]([^'"]+)['"]\s*\)`)
+
+// applyIncludes finds include() directives in src, evaluates each referenced
+// .bld with the same predeclared environment (so its macros see bare gen_rule,
+// blade, isinstance, ...), and merges the resulting globals into pre. A no-op
+// include builtin satisfies the runtime call itself (the work is done here).
+func (l *Loader) applyIncludes(src string, pre starlark.StringDict) error {
+	pre["include"] = noopInclude()
+	for _, m := range includeRe.FindAllStringSubmatch(src, -1) {
+		globals, err := l.includeGlobals(m[1])
+		if err != nil {
+			return err
+		}
+		for k, v := range globals {
+			pre[k] = v
+		}
+	}
+	return nil
+}
+
+// includeGlobals evaluates an included .bld (recursively resolving its own
+// includes) with the full BUILD predeclared environment and returns its globals.
+func (l *Loader) includeGlobals(module string) (starlark.StringDict, error) {
+	rel := strings.TrimPrefix(module, "//")
+	p := filepath.Join(l.Root, filepath.FromSlash(rel))
+	if g, ok := l.incCache[p]; ok {
+		return g, nil
+	}
+	src, err := os.ReadFile(p)
+	if err != nil {
+		return nil, fmt.Errorf("include(%q): %w", module, err)
+	}
+	pre := l.buildEnv()
+	if err := l.applyIncludes(string(src), pre); err != nil {
+		return nil, fmt.Errorf("include(%q): %w", module, err)
+	}
+	t := &starlark.Thread{Name: p, Load: l.loadExtension}
+	globals, err := starlark.ExecFileOptions(fileOptions(), t, p, src, pre)
+	if err != nil {
+		return nil, fmt.Errorf("include(%q): %w", module, err)
+	}
+	l.incCache[p] = globals
+	return globals, nil
+}
+
+func noopInclude() *starlark.Builtin {
+	return starlark.NewBuiltin("include", func(_ *starlark.Thread, b *starlark.Builtin, args starlark.Tuple, kwargs []starlark.Tuple) (starlark.Value, error) {
+		return starlark.None, nil
+	})
 }
 
 func (l *Loader) addRuleBuiltins(pre starlark.StringDict) {
