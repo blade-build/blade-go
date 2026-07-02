@@ -29,6 +29,10 @@ type Generator struct {
 	TestSyslibs    []string         // cc_test_config gtest libs that are #-syslibs
 
 	foreignIncs map[*graph.Node][]string // include dirs exported by foreign_cc_library nodes
+
+	// ForceLoadPorts are vcpkg ports whose whole archive must be linked
+	// (vcpkg_config link_all_symbols: gflags/glog/yaml-cpp).
+	ForceLoadPorts map[string]bool
 }
 
 // New returns a Generator with the default build dir and protobuf settings.
@@ -521,7 +525,14 @@ func (gen *Generator) transitiveVcpkgs(n *graph.Node) []label.VcpkgDep {
 func (gen *Generator) vcpkgLinkArgs(n *graph.Node) []string {
 	var out []string
 	for _, v := range gen.transitiveVcpkgs(n) {
-		out = append(out, gen.Vcpkg.LibArg(v.Lib))
+		arg := gen.Vcpkg.LibArg(v.Lib)
+		// Force-load a link_all_symbols port's archive (gflags/glog registries).
+		// Only when it resolved to a real archive, not a -l fallback.
+		if gen.ForceLoadPorts[v.Port] && !strings.HasPrefix(arg, "-") {
+			out = append(out, gen.Tc.ForceLoad(arg)...)
+		} else {
+			out = append(out, arg)
+		}
 	}
 	return out
 }
@@ -539,8 +550,12 @@ func (gen *Generator) transitiveLibs(n *graph.Node, libOf map[*graph.Node]string
 			}
 			seen[dep] = true
 			if lib, ok := libOf[dep]; ok {
-				libs = append(libs, lib)
 				implicit = append(implicit, lib)
+				if dep.Target.AttrBool("link_all_symbols") {
+					libs = append(libs, gen.Tc.ForceLoad(lib)...)
+				} else {
+					libs = append(libs, lib)
+				}
 			}
 			walk(dep)
 		}

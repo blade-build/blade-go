@@ -54,6 +54,12 @@ func (t *Target) AttrString(name string) string {
 	return s
 }
 
+// AttrBool returns a boolean attribute (false when absent or not a bool).
+func (t *Target) AttrBool(name string) bool {
+	b, _ := t.Attrs[name].(bool)
+	return b
+}
+
 // Registry collects targets keyed by label, rejecting duplicates.
 type Registry struct {
 	byLabel map[string]*Target

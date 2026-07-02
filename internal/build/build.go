@@ -133,6 +133,16 @@ func configureVcpkg(gen *cc.Generator, cfg *config.Config, root string) {
 	if !ok || len(packages) == 0 {
 		return
 	}
+	// Ports whose whole archive must be linked (link_all_symbols: gflags/glog/
+	// yaml-cpp -- their flag/registry static initializers must survive --gc).
+	gen.ForceLoadPorts = map[string]bool{}
+	for name, spec := range packages {
+		if m, ok := spec.(map[string]any); ok {
+			if b, ok := m["link_all_symbols"].(bool); ok && b {
+				gen.ForceLoadPorts[name] = true
+			}
+		}
+	}
 	baseline, _ := cfg.GetItem("vcpkg_config", "baseline")
 	baselineStr, _ := baseline.(string)
 	manifestDir := filepath.Join(root, gen.BuildDir, ".blade-go-vcpkg")

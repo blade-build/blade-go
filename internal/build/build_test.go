@@ -291,6 +291,37 @@ func TestBuildResourceLibrary(t *testing.T) {
 	}
 }
 
+func TestBuildLinkAllSymbols(t *testing.T) {
+	// A cc_library with link_all_symbols must be force-loaded (whole archive)
+	// into a consumer binary, so its static initializers survive.
+	root := t.TempDir()
+	files := map[string]string{
+		"BLADE_ROOT": `cc_config()`,
+		"reg/BUILD":  `cc_library(name = 'reg', srcs = ['r.cc'], link_all_symbols = True, visibility = ['PUBLIC'])`,
+		"app/BUILD":  `cc_binary(name = 'app', srcs = ['m.cc'], deps = ['//reg:reg'])`,
+	}
+	for rel, content := range files {
+		p := filepath.Join(root, rel)
+		if err := os.MkdirAll(filepath.Dir(p), 0o755); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(p, []byte(content), 0o644); err != nil {
+			t.Fatal(err)
+		}
+	}
+	ninjaFile, err := Build(root, []string{"//app:app"}, Options{RunNinja: false})
+	if err != nil {
+		t.Fatal(err)
+	}
+	out := string(mustRead(t, ninjaFile))
+	archive := "build64_release/reg/libreg.a"
+	// Platform-specific whole-archive wrapping around the archive.
+	if !strings.Contains(out, "-force_load,"+archive) &&
+		!strings.Contains(out, "--whole-archive "+archive) {
+		t.Errorf("link_all_symbols archive not force-loaded:\n%s", out)
+	}
+}
+
 func TestRunsCcTests(t *testing.T) {
 	if _, err := exec.LookPath("ninja"); err != nil {
 		t.Skip("ninja not available")
