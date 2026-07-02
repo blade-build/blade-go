@@ -116,3 +116,23 @@ As of Phase 3, `blade build //pkg:target` works for cc targets: it finds
 BLADE_ROOT, resolves the graph, generates `build64_release/build.ninja`, and runs
 ninja to produce the binary/archive. `blade test //pkg/...` builds and runs every
 cc_test in the pattern.
+
+## Performance
+
+Front-end cost (load BUILD files → resolve graph → generate ninja; *not* the
+compile/link, which ninja does) on flare's **whole repo** (`//...`, 685 targets),
+warm, measured with `blade build --no-build` on both:
+
+| phase | Python Blade | blade-go |
+| --- | --- | --- |
+| load + resolve graph | ~0.19s | ~0.12s |
+| vcpkg install (idempotent) | skipped (stamped) | skipped (stamped) |
+| generate ninja | ~0.8s | ~0.05s |
+| **front-end total** | **~1.0s** | **~0.17s** |
+
+Getting there was mostly removing accidental O(bad) work, each found by
+profiling (`BLADE_TIMING=1` for per-phase timing, `BLADE_CPUPROFILE=<path>` for a
+pprof profile): dedup DAG traversals by node (not path), an MD5 stamp to skip an
+unchanged `vcpkg install` (as Blade does), caching the pkg-config `-framework`
+scan instead of re-reading it per link, and pruning the build-output/hidden dirs
+from the whole-repo walk. From ~42s to ~0.17s.
