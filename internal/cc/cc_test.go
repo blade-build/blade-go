@@ -356,3 +356,23 @@ func TestEndToEndVcpkg(t *testing.T) {
 		t.Errorf("output=%q, want vcpkg-ok", strings.TrimSpace(string(o)))
 	}
 }
+
+func TestHeaderOnlyLibraryNoArchive(t *testing.T) {
+	// A cc_library with only headers (no srcs) must not emit an `ar` edge with
+	// zero object files (ar errors on that). Found compiling flare's //base:align.
+	g, _ := buildGraph(t, map[string]string{
+		"h/BUILD":   `cc_library(name = 'h', hdrs = ['h.h'], visibility = ['PUBLIC'])`,
+		"app/BUILD": `cc_binary(name = 'app', srcs = ['main.cc'], deps = ['//h:h'])`,
+	}, "//app:app")
+	f, err := New(toolchain.Detect()).Generate(g)
+	if err != nil {
+		t.Fatal(err)
+	}
+	out := f.String()
+	if strings.Contains(out, "libh.a") {
+		t.Errorf("header-only library should produce no archive:\n%s", out)
+	}
+	if !strings.Contains(out, "build build64_release/app/app: link") {
+		t.Errorf("consumer link edge missing:\n%s", out)
+	}
+}
