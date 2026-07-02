@@ -13,6 +13,7 @@ import (
 	"strings"
 
 	"go.starlark.net/starlark"
+	"go.starlark.net/starlarkstruct"
 	"go.starlark.net/syntax"
 
 	"github.com/blade-build/blade-go/internal/bladectx"
@@ -24,7 +25,27 @@ import (
 // rule-specific attribute validation is deferred to later phases.
 var ruleNames = []string{
 	"cc_library", "cc_binary", "cc_test", "cc_benchmark",
-	"proto_library", "resource_library",
+	"proto_library", "resource_library", "gen_rule",
+}
+
+// thread-local keys for the currently-executing BUILD file's context.
+const (
+	threadPkg = "blade.pkg"
+	threadDir = "blade.dir"
+)
+
+func pkgOf(thread *starlark.Thread) string {
+	if v, ok := thread.Local(threadPkg).(string); ok {
+		return v
+	}
+	return ""
+}
+
+func dirOf(thread *starlark.Thread) string {
+	if v, ok := thread.Local(threadDir).(string); ok {
+		return v
+	}
+	return ""
 }
 
 // configNames are the configuration functions a BLADE_ROOT / blade.conf may call.
@@ -41,6 +62,8 @@ type Loader struct {
 	BuildDir string // build output dir mirror (e.g. "build64_release")
 	Targets  *target.Registry
 	Config   *config.Config
+
+	extCache map[string]starlark.StringDict // load()'ed extensions by path
 }
 
 // New returns a Loader rooted at the given workspace directory.
@@ -54,6 +77,7 @@ func New(root string) *Loader {
 		BuildDir: "build64_release",
 		Targets:  target.NewRegistry(),
 		Config:   config.New(),
+		extCache: map[string]starlark.StringDict{},
 	}
 }
 
@@ -72,9 +96,9 @@ func fileOptions() *syntax.FileOptions {
 func (l *Loader) LoadConfigFile(pathname string) error {
 	pre := starlark.StringDict{"blade": bladectx.ConfigModule()}
 	l.addConfigBuiltins(pre)
-	l.addHelperBuiltins(pre, "")
+	pre["enable_if"] = enableIfBuiltin()
 	pre["load_value"] = l.loadValueBuiltin()
-	return l.exec(pathname, pre)
+	return l.exec(pathname, "", "", pre)
 }
 
 // loadValueBuiltin implements load_value(filepath): read a file (relative to the
@@ -118,25 +142,74 @@ func (l *Loader) LoadBuildFile(pathname string) error {
 	if pkg == "." {
 		pkg = ""
 	}
-	pre := starlark.StringDict{"blade": bladectx.BuildModule(pkg, l.BuildDir)}
-	l.addRuleBuiltins(pre, pkg)
-	l.addHelperBuiltins(pre, dir)
-	return l.exec(pathname, pre)
+	pre := l.buildEnv()
+	return l.exec(pathname, pkg, dir, pre)
 }
 
-func (l *Loader) exec(pathname string, pre starlark.StringDict) error {
+// buildEnv is the predeclared environment for BUILD files: rules, native, the
+// blade context, and helpers. Rules read their package from the thread, so the
+// same builtins work when invoked from a macro loaded via load().
+func (l *Loader) buildEnv() starlark.StringDict {
+	pre := starlark.StringDict{
+		"blade":  bladectx.BuildModule("", l.BuildDir, l.Config),
+		"native": l.nativeModule(),
+	}
+	l.addRuleBuiltins(pre)
+	l.addHelperBuiltins(pre)
+	return pre
+}
+
+func (l *Loader) exec(pathname, pkg, dir string, pre starlark.StringDict) error {
 	src, err := os.ReadFile(pathname)
 	if err != nil {
 		return err
 	}
-	thread := &starlark.Thread{Name: pathname}
+	thread := &starlark.Thread{Name: pathname, Load: l.loadExtension}
+	thread.SetLocal(threadPkg, pkg)
+	thread.SetLocal(threadDir, dir)
 	_, err = starlark.ExecFileOptions(fileOptions(), thread, pathname, src, pre)
 	return err
 }
 
-func (l *Loader) addRuleBuiltins(pre starlark.StringDict, pkg string) {
+// nativeModule exposes the rule builtins as `native.<rule>` for use inside .bld
+// macros (e.g. cc_flare_library calling native.gen_rule / native.cc_library).
+func (l *Loader) nativeModule() starlark.Value {
+	m := starlark.StringDict{}
 	for _, name := range ruleNames {
-		pre[name] = l.ruleBuiltin(name, pkg)
+		m[name] = l.ruleBuiltin(name)
+	}
+	return starlarkstruct.FromStringDict(starlarkstruct.Default, m)
+}
+
+// loadExtension implements Starlark load(): evaluate a "//path.bld" extension
+// once and return its globals. Extensions see `native`, `blade`, and helpers.
+func (l *Loader) loadExtension(_ *starlark.Thread, module string) (starlark.StringDict, error) {
+	rel := strings.TrimPrefix(module, "//")
+	p := filepath.Join(l.Root, filepath.FromSlash(rel))
+	if g, ok := l.extCache[p]; ok {
+		return g, nil
+	}
+	src, err := os.ReadFile(p)
+	if err != nil {
+		return nil, fmt.Errorf("load(%q): %w", module, err)
+	}
+	pre := starlark.StringDict{
+		"blade":     bladectx.BuildModule("", l.BuildDir, l.Config),
+		"native":    l.nativeModule(),
+		"enable_if": enableIfBuiltin(),
+	}
+	et := &starlark.Thread{Name: p, Load: l.loadExtension}
+	globals, err := starlark.ExecFileOptions(fileOptions(), et, p, src, pre)
+	if err != nil {
+		return nil, fmt.Errorf("load(%q): %w", module, err)
+	}
+	l.extCache[p] = globals
+	return globals, nil
+}
+
+func (l *Loader) addRuleBuiltins(pre starlark.StringDict) {
+	for _, name := range ruleNames {
+		pre[name] = l.ruleBuiltin(name)
 	}
 }
 
@@ -146,17 +219,14 @@ func (l *Loader) addConfigBuiltins(pre starlark.StringDict) {
 	}
 }
 
-// addHelperBuiltins registers glob/enable_if. `dir` is the package's on-disk
-// directory (for glob); pass "" when globbing is not applicable.
-func (l *Loader) addHelperBuiltins(pre starlark.StringDict, dir string) {
+// addHelperBuiltins registers glob/enable_if. glob reads the current package's
+// on-disk directory from the thread. (`fail`/`print` come from the universe.)
+func (l *Loader) addHelperBuiltins(pre starlark.StringDict) {
 	pre["enable_if"] = enableIfBuiltin()
-	if dir != "" {
-		pre["glob"] = globBuiltin(dir)
-	}
-	// `fail` and `print` come from Starlark's universe.
+	pre["glob"] = globBuiltin()
 }
 
-func (l *Loader) ruleBuiltin(ruleType, pkg string) *starlark.Builtin {
+func (l *Loader) ruleBuiltin(ruleType string) *starlark.Builtin {
 	return starlark.NewBuiltin(ruleType, func(thread *starlark.Thread, b *starlark.Builtin, args starlark.Tuple, kwargs []starlark.Tuple) (starlark.Value, error) {
 		attrs := map[string]any{}
 		name := ""
@@ -180,7 +250,7 @@ func (l *Loader) ruleBuiltin(ruleType, pkg string) *starlark.Builtin {
 		if name == "" {
 			return nil, fmt.Errorf("%s: missing required 'name'", ruleType)
 		}
-		t := &target.Target{Type: ruleType, Name: name, Package: pkg, Attrs: attrs, Pos: callerPos(thread)}
+		t := &target.Target{Type: ruleType, Name: name, Package: pkgOf(thread), Attrs: attrs, Pos: callerPos(thread)}
 		if err := l.Targets.Add(t); err != nil {
 			return nil, err
 		}
@@ -220,8 +290,12 @@ func enableIfBuiltin() *starlark.Builtin {
 	})
 }
 
-func globBuiltin(dir string) *starlark.Builtin {
-	return starlark.NewBuiltin("glob", func(_ *starlark.Thread, b *starlark.Builtin, args starlark.Tuple, kwargs []starlark.Tuple) (starlark.Value, error) {
+func globBuiltin() *starlark.Builtin {
+	return starlark.NewBuiltin("glob", func(thread *starlark.Thread, b *starlark.Builtin, args starlark.Tuple, kwargs []starlark.Tuple) (starlark.Value, error) {
+		dir := dirOf(thread)
+		if dir == "" {
+			return nil, fmt.Errorf("glob is only available in a BUILD file")
+		}
 		var includeV starlark.Value
 		var excludeV starlark.Value = starlark.NewList(nil)
 		allowEmpty := false
