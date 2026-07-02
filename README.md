@@ -42,7 +42,7 @@ known.
 | --- | --- | --- |
 | 0 | Scaffold: repo, CI+coverage, Starlark toolchain wired | ✅ |
 | 1 | Load & config: BUILD/BLADE_ROOT eval, `blade` context, config capture, lambdas, `glob`/`fail`/`enable_if`/`load_value` | ✅ |
-| 2 | Graph & analysis: target model, dep expansion, visibility, topo sort | ⬜ |
+| 2 | Graph & analysis: dep expansion, visibility, topo sort | ✅ |
 | 3 | cc core → ninja: compile/ar/link, includes, syslibs, toolchain flags | ⬜ |
 | 4 | `proto_library` (protoc C++ codegen + ordering) | ⬜ |
 | 5 | Custom rules (`define_rule`) + `cc_flare_library` | ⬜ |
