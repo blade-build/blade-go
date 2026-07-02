@@ -1,0 +1,12 @@
+# Go build artifacts
+/blade
+/blade-go
+*.exe
+*.test
+*.out
+coverage.*
+
+# Editor / OS
+.DS_Store
+.idea/
+.vscode/
