@@ -16,13 +16,15 @@ import (
 // Generator turns a resolved graph into a ninja file.
 type Generator struct {
 	Tc           *toolchain.Toolchain
-	BuildDir     string          // build output dir (e.g. "build64_release")
-	Protoc       string          // protoc executable (proto_library codegen)
-	ProtobufLibs []string        // system libs a proto_library pulls in (bare names)
-	Vcpkg        *vcpkg.Resolver // resolves vcpkg#port:lib thirdparty deps
-	Cppflags     []string        // cc_config flags for all C-family compiles
-	Cxxflags     []string        // cc_config flags for C++ compiles only
-	Cflags       []string        // cc_config flags for C compiles only
+	BuildDir     string           // build output dir (e.g. "build64_release")
+	Protoc       string           // protoc executable (proto_library codegen)
+	ProtobufLibs []string         // system libs a proto_library pulls in (bare names)
+	Vcpkg        *vcpkg.Resolver  // resolves vcpkg#port:lib thirdparty deps
+	Cppflags     []string         // cc_config flags for all C-family compiles
+	Cxxflags     []string         // cc_config flags for C++ compiles only
+	Cflags       []string         // cc_config flags for C compiles only
+	TestVcpkgs   []label.VcpkgDep // cc_test_config gtest libs that resolve to vcpkg
+	TestSyslibs  []string         // cc_test_config gtest libs that are #-syslibs
 }
 
 // New returns a Generator with the default build dir and protobuf settings.
@@ -90,12 +92,21 @@ func (gen *Generator) Generate(g *graph.Graph) (*ninja.File, error) {
 			if gen.hasProtoInClosure(n) {
 				syslibs = uniqueStrings(append(syslibs, gen.ProtobufLibs...))
 			}
+			vcpkgArgs := gen.vcpkgLinkArgs(n)
+			// cc_test / cc_benchmark link the configured test framework
+			// (cc_test_config gtest_libs / gtest_main_libs).
+			if n.Target.Type == "cc_test" || n.Target.Type == "cc_benchmark" {
+				for _, v := range gen.TestVcpkgs {
+					vcpkgArgs = append(vcpkgArgs, gen.Vcpkg.LibArg(v.Lib))
+				}
+				syslibs = uniqueStrings(append(syslibs, gen.TestSyslibs...))
+			}
 			f.AddBuild(ninja.Build{
 				Outputs:  []string{gen.binPath(n)},
 				Rule:     "link",
 				Inputs:   objs,
 				Implicit: implicit,
-				Vars:     map[string]string{"libs": gen.linkArgs(libs, syslibs, gen.vcpkgLinkArgs(n))},
+				Vars:     map[string]string{"libs": gen.linkArgs(libs, syslibs, vcpkgArgs)},
 			})
 		}
 	}
@@ -296,7 +307,11 @@ func (gen *Generator) includes(n *graph.Node) string {
 		}
 	}
 	walk(n)
-	if inc := gen.Vcpkg.IncludeDir(); inc != "" && len(gen.transitiveVcpkgs(n)) > 0 {
+	needVcpkg := len(gen.transitiveVcpkgs(n)) > 0
+	if (n.Target.Type == "cc_test" || n.Target.Type == "cc_benchmark") && len(gen.TestVcpkgs) > 0 {
+		needVcpkg = true // the test framework's headers (gtest) live in the vcpkg tree
+	}
+	if inc := gen.Vcpkg.IncludeDir(); inc != "" && needVcpkg {
 		dirs = append(dirs, inc)
 	}
 	var b strings.Builder

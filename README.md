@@ -53,7 +53,8 @@ known.
 | 8c | flare `.bld` loads (isinstance builtin + flare assert/`is`/str-concat fixes) | ✅ |
 | 8d | differential harness vs Python Blade (ninja parser + CI-wired) | ✅ |
 | 8e | cc_config compile flags via config-lambda evaluation | ✅ |
-| 8f | full flare compile (needs a vcpkg+flare env) | ⬜ |
+| 8f | cc_test links cc_test_config test framework (gtest via vcpkg) | ✅ |
+| 8g | full flare compile (blocked on thirdparty *versions* in vcpkg) | ⬜ |
 
 Each phase is one PR, merged after CI is green.
 
