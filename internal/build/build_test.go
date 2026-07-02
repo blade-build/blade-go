@@ -520,3 +520,30 @@ cc_test_config(
 		}
 	}
 }
+
+func TestBuildDefines(t *testing.T) {
+	// A target's `defs` become -D flags on its compiles (flare's cc_test size
+	// variants: defs = ['BUFFER_BLOCK_SIZE=4096']).
+	root := t.TempDir()
+	files := map[string]string{
+		"BLADE_ROOT": `cc_config()`,
+		"p/BUILD":    `cc_binary(name = 'app', srcs = ['m.cc'], defs = ['FOO=1', 'BAR'])`,
+	}
+	for rel, content := range files {
+		p := filepath.Join(root, rel)
+		if err := os.MkdirAll(filepath.Dir(p), 0o755); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(p, []byte(content), 0o644); err != nil {
+			t.Fatal(err)
+		}
+	}
+	ninjaFile, err := Build(root, []string{"//p:app"}, Options{RunNinja: false})
+	if err != nil {
+		t.Fatal(err)
+	}
+	out := string(mustRead(t, ninjaFile))
+	if !strings.Contains(out, "defs = -DFOO=1 -DBAR") {
+		t.Errorf("per-target defs not applied:\n%s", out)
+	}
+}
