@@ -8,6 +8,7 @@ import (
 	"os/exec"
 	"path/filepath"
 	"strings"
+	"time"
 
 	"go.starlark.net/starlark"
 
@@ -229,9 +230,44 @@ type Options struct {
 	RunNinja bool
 }
 
+// timing reports per-phase front-end durations to stderr when BLADE_TIMING is
+// set -- load config, load BUILD files + resolve the graph, generate ninja.
+type timing struct {
+	on    bool
+	start time.Time
+	last  time.Time
+	marks [][2]any // (name, duration)
+}
+
+func newTiming() *timing {
+	now := time.Now()
+	return &timing{on: os.Getenv("BLADE_TIMING") != "", start: now, last: now}
+}
+
+func (t *timing) mark(name string) {
+	if !t.on {
+		return
+	}
+	now := time.Now()
+	t.marks = append(t.marks, [2]any{name, now.Sub(t.last)})
+	t.last = now
+}
+
+func (t *timing) report(nodes int) {
+	if !t.on {
+		return
+	}
+	fmt.Fprintf(os.Stderr, "blade-go front-end (%d graph nodes):\n", nodes)
+	for _, m := range t.marks {
+		fmt.Fprintf(os.Stderr, "  %-12s %v\n", m[0], m[1].(time.Duration).Round(time.Millisecond))
+	}
+	fmt.Fprintf(os.Stderr, "  %-12s %v\n", "TOTAL", time.Since(t.start).Round(time.Millisecond))
+}
+
 // plan loads the workspace and produces the graph, generator, and ninja file for
 // the given targets (patterns are expanded to concrete labels, also returned).
 func plan(root string, targets []string) (*graph.Graph, *cc.Generator, *ninja.File, []string, error) {
+	tm := newTiming()
 	l := loader.New(root)
 	bladeRoot := filepath.Join(root, "BLADE_ROOT")
 	if _, err := os.Stat(bladeRoot); err == nil {
@@ -239,6 +275,7 @@ func plan(root string, targets []string) (*graph.Graph, *cc.Generator, *ninja.Fi
 			return nil, nil, nil, nil, fmt.Errorf("BLADE_ROOT: %w", err)
 		}
 	}
+	tm.mark("config")
 	b := graph.NewBuilder(l)
 	expanded, err := b.Expand(targets)
 	if err != nil {
@@ -248,15 +285,19 @@ func plan(root string, targets []string) (*graph.Graph, *cc.Generator, *ninja.Fi
 	if err != nil {
 		return nil, nil, nil, nil, err
 	}
+	tm.mark("load+graph")
 	gen := cc.New(toolchain.Detect())
 	if exe, err := os.Executable(); err == nil {
 		gen.Self = exe // resource_library codegen re-invokes this binary
 	}
 	configureVcpkg(gen, l.Config, root)
+	tm.mark("vcpkg-install") // one-time provisioning (idempotent), not analysis
 	configureProto(gen, l.Config)
 	configureCcFlags(gen, l.Config)
 	configureTestLibs(gen, l.Config)
 	f, err := gen.Generate(g)
+	tm.mark("generate")
+	tm.report(g.Len())
 	if err != nil {
 		return nil, nil, nil, nil, err
 	}

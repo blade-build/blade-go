@@ -89,9 +89,20 @@ func runTest(targets []string) error {
 	return nil
 }
 
-func runBuild(targets []string) error {
+func runBuild(args []string) error {
+	// --no-build: run the front-end (load + graph + generate ninja) but don't run
+	// ninja -- for timing/inspection, mirroring Python blade's flag.
+	noBuild := false
+	var targets []string
+	for _, a := range args {
+		if a == "--no-build" {
+			noBuild = true
+			continue
+		}
+		targets = append(targets, a)
+	}
 	if len(targets) == 0 {
-		return fmt.Errorf("usage: blade build <target>...")
+		return fmt.Errorf("usage: blade build [--no-build] <target>...")
 	}
 	cwd, err := os.Getwd()
 	if err != nil {
@@ -101,10 +112,14 @@ func runBuild(targets []string) error {
 	if err != nil {
 		return err
 	}
-	ninjaFile, err := build.Build(root, targets, build.Options{RunNinja: true})
+	ninjaFile, err := build.Build(root, targets, build.Options{RunNinja: !noBuild})
 	if err != nil {
 		return err
 	}
-	fmt.Println("blade: built", targets, "->", ninjaFile)
+	verb := "built"
+	if noBuild {
+		verb = "generated"
+	}
+	fmt.Println("blade:", verb, targets, "->", ninjaFile)
 	return nil
 }

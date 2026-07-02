@@ -469,8 +469,13 @@ func uniqueStrings(ss []string) []string {
 func (gen *Generator) includes(n *graph.Node) string {
 	dirs := []string{".", gen.BuildDir}
 	seen := map[string]bool{".": true, gen.BuildDir: true}
+	visited := map[*graph.Node]bool{} // walk each node once, not once per DAG path
 	var walk func(*graph.Node)
 	walk = func(node *graph.Node) {
+		if visited[node] {
+			return
+		}
+		visited[node] = true
 		for _, d := range node.Target.AttrStrings("export_incs") {
 			if !seen[d] {
 				seen[d] = true
@@ -520,8 +525,13 @@ func (gen *Generator) includes(n *graph.Node) string {
 func (gen *Generator) transitiveVcpkgs(n *graph.Node) []label.VcpkgDep {
 	var out []label.VcpkgDep
 	seen := map[string]bool{}
+	visited := map[*graph.Node]bool{} // walk each node once, not once per DAG path
 	var walk func(*graph.Node)
 	walk = func(node *graph.Node) {
+		if visited[node] {
+			return
+		}
+		visited[node] = true
 		for _, v := range node.Vcpkgs {
 			key := v.Port + ":" + v.Lib
 			if !seen[key] {
@@ -583,8 +593,13 @@ func (gen *Generator) transitiveLibs(n *graph.Node, libOf map[*graph.Node]string
 func (gen *Generator) transitiveSyslibs(n *graph.Node) []string {
 	var out []string
 	seen := map[string]bool{}
+	visited := map[*graph.Node]bool{} // walk each node once, not once per DAG path
 	var walk func(*graph.Node)
 	walk = func(node *graph.Node) {
+		if visited[node] {
+			return
+		}
+		visited[node] = true
 		for _, s := range node.Syslibs {
 			if !seen[s.Name] {
 				seen[s.Name] = true
