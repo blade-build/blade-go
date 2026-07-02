@@ -18,6 +18,18 @@ jobs:
         with:
           go-version: '1.25'
 
+      - name: Set up Python  # for the Python Blade oracle (differential harness)
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+
+      - name: Checkout Python Blade (oracle)
+        uses: actions/checkout@v4
+        with:
+          repository: blade-build/blade-build
+          ref: master
+          path: blade-build
+
       - name: Install build tools  # cc/proto end-to-end tests (gcc/g++ preinstalled)
         run: sudo apt-get update && sudo apt-get install -y ninja-build protobuf-compiler libprotobuf-dev pkg-config
 
@@ -28,6 +40,8 @@ jobs:
         run: go vet ./...
 
       - name: Test with coverage
+        env:
+          BLADE_PY: ${{ github.workspace }}/blade-build/blade
         run: go test -race -covermode=atomic -coverprofile=coverage.out ./...
 
       - name: Coverage summary
