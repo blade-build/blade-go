@@ -5,6 +5,7 @@ package graph
 
 import (
 	"fmt"
+	"os"
 	"path/filepath"
 	"strings"
 
@@ -66,6 +67,20 @@ func NewBuilder(l *loader.Loader) *Builder {
 // vcpkgFromThirdparty maps a thirdparty label to a vcpkg dep: the port is the
 // first path component after the prefix, the lib is the target name. Returns
 // false when the label is not under the prefix.
+// hasRealTarget reports whether the label names a target defined by a real BUILD
+// file (as opposed to a bare //thirdparty/<port>:<lib> vcpkg reference). Used to
+// let source-built thirdparty packages (jsoncpp) win over the vcpkg heuristic.
+func (b *Builder) hasRealTarget(lbl label.Label) bool {
+	buildFile := filepath.Join(b.loader.Root, filepath.FromSlash(lbl.Package), "BUILD")
+	if _, err := os.Stat(buildFile); err != nil {
+		return false
+	}
+	if err := b.ensurePackage(lbl.Package); err != nil {
+		return false
+	}
+	return b.loader.Targets.Get(lbl.String()) != nil
+}
+
 func (b *Builder) vcpkgFromThirdparty(lbl label.Label) (label.VcpkgDep, bool) {
 	if b.VcpkgPrefix == "" || !strings.HasPrefix(lbl.Package, b.VcpkgPrefix) {
 		return label.VcpkgDep{}, false
@@ -135,7 +150,11 @@ func (b *Builder) resolve(lbl label.Label) (*Node, error) {
 			n.Syslibs = append(n.Syslibs, dlbl)
 			continue
 		}
-		if v, ok := b.vcpkgFromThirdparty(dlbl); ok {
+		if v, ok := b.vcpkgFromThirdparty(dlbl); ok && !b.hasRealTarget(dlbl) {
+			// //thirdparty/<port>:<lib> with no BUILD of its own is a vcpkg port.
+			// But a source-built thirdparty package (jsoncpp) has a real BUILD;
+			// its own gen_rule chain deps must resolve to those targets, not be
+			// misrouted to a vcpkg port that shares the directory name.
 			n.Vcpkgs = append(n.Vcpkgs, v)
 			continue
 		}

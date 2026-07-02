@@ -189,6 +189,70 @@ func TestBuildRoutesVcpkgProtobuf(t *testing.T) {
 	}
 }
 
+func TestBuildForeignCcLibrary(t *testing.T) {
+	// A source-built thirdparty library (jsoncpp-style): a gen_rule chain
+	// (unpack -> build) produces an archive under thirdparty/, wrapped by a
+	// foreign_cc_library. A consumer must (1) resolve the chain -- the build
+	// gen_rule's `foo.stamp` src points at the unpack gen_rule's output, not the
+	// source tree; (2) see $OUT_DIR expanded; (3) link the archive; (4) get the
+	// exported include dirs. The thirdparty/ package has a real BUILD, so its
+	// intra-package deps must NOT be misrouted to vcpkg.
+	root := t.TempDir()
+	files := map[string]string{
+		"BLADE_ROOT": `cc_config()`,
+		"thirdparty/foo/BUILD": `
+gen_rule(name = 'foo_unpack', outs = ['foo.stamp'], cmd = 'touch $OUTS')
+gen_rule(name = 'foo_build', srcs = ['foo.stamp'], outs = ['lib/libfoo.a'],
+         deps = [':foo_unpack'], cmd = 'build @ $OUT_DIR', system_export_incs = 'include')
+foreign_cc_library(name = 'foo', deps = [':foo_build'], visibility = ['PUBLIC'])
+`,
+		"app/BUILD": `cc_binary(name = 'app', srcs = ['m.cc'], deps = ['//thirdparty/foo:foo'])`,
+	}
+	for rel, content := range files {
+		p := filepath.Join(root, rel)
+		if err := os.MkdirAll(filepath.Dir(p), 0o755); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(p, []byte(content), 0o644); err != nil {
+			t.Fatal(err)
+		}
+	}
+	ninjaFile, err := Build(root, []string{"//app:app"}, Options{RunNinja: false})
+	if err != nil {
+		t.Fatalf("foreign_cc_library build failed to plan: %v", err)
+	}
+	out := string(mustRead(t, ninjaFile))
+
+	// (1) chain: foo_build's stamp src resolves to the unpack's build-dir output.
+	if !strings.Contains(out, "build64_release/thirdparty/foo/foo.stamp") {
+		t.Errorf("gen_rule chain src not resolved to the dep's output:\n%s", out)
+	}
+	// (2) $OUT_DIR expanded to the target's output dir.
+	if !strings.Contains(out, "build @ build64_release/thirdparty/foo") {
+		t.Errorf("$OUT_DIR not expanded:\n%s", out)
+	}
+	// (3) consumer links the built archive.
+	if !strings.Contains(out, "build64_release/thirdparty/foo/lib/libfoo.a") {
+		t.Errorf("consumer does not link the foreign archive:\n%s", out)
+	}
+	// (4) consumer gets the exported include dirs.
+	if !strings.Contains(out, "-Ibuild64_release/thirdparty ") && !strings.Contains(out, "-Ibuild64_release/thirdparty\n") {
+		t.Errorf("consumer missing the pkg-parent include dir:\n%s", out)
+	}
+	if !strings.Contains(out, "-Ibuild64_release/thirdparty/foo/include") {
+		t.Errorf("consumer missing system_export_incs dir:\n%s", out)
+	}
+}
+
+func mustRead(t *testing.T, p string) []byte {
+	t.Helper()
+	data, err := os.ReadFile(p)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return data
+}
+
 func TestRunsCcTests(t *testing.T) {
 	if _, err := exec.LookPath("ninja"); err != nil {
 		t.Skip("ninja not available")

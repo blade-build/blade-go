@@ -26,6 +26,8 @@ type Generator struct {
 	Cflags         []string         // cc_config flags for C compiles only
 	TestVcpkgs     []label.VcpkgDep // cc_test_config gtest libs that resolve to vcpkg
 	TestSyslibs    []string         // cc_test_config gtest libs that are #-syslibs
+
+	foreignIncs map[*graph.Node][]string // include dirs exported by foreign_cc_library nodes
 }
 
 // New returns a Generator with the default build dir and protobuf settings.
@@ -68,10 +70,20 @@ func (gen *Generator) Generate(g *graph.Graph) (*ninja.File, error) {
 	libOf := map[*graph.Node]string{}
 	genHdrsOf := map[*graph.Node][]string{}
 	genFilesOf := map[*graph.Node]map[string]string{}
+	gen.foreignIncs = map[*graph.Node][]string{}
 	for _, n := range sorted {
 		switch {
 		case n.Target.Type == "gen_rule":
 			gen.emitGenRule(f, n, genFilesOf)
+		case n.Target.Type == "foreign_cc_library":
+			// A source-built thirdparty library (jsoncpp): its gen_rule dep
+			// produced the archive + header shims. Contribute the archive to
+			// consumers' links (via libOf) and the include dirs to their compiles.
+			lib, incs := gen.foreignInfo(n, genFilesOf)
+			if lib != "" {
+				libOf[n] = lib
+			}
+			gen.foreignIncs[n] = incs
 		case n.Target.Type == "proto_library":
 			lib, hdrs := gen.emitProto(f, n)
 			libOf[n] = lib
@@ -146,26 +158,45 @@ func (gen *Generator) emitRules(f *ninja.File) {
 
 // emitGenRule emits a custom-command edge for a gen_rule. It records the mapping
 // from each declared `out` name to its build-dir path so a consumer that lists a
-// generated file in `srcs` resolves to the generated path.
+// generated file in `srcs` resolves to the generated path. A src that is itself
+// a generated file (an out of a dep gen_rule -- the unpack->generate->build
+// chains in foreign_build) resolves to that build path and becomes an implicit
+// dep, so ninja orders the chain. The command sees the blade gen_rule variables
+// $SRCS/$OUTS/$OUT_DIR/$FIRST_SRC/$SRC_DIR/$BUILD_DIR.
 func (gen *Generator) emitGenRule(f *ninja.File, n *graph.Node, genFilesOf map[*graph.Node]map[string]string) {
 	pkg := n.Target.Package
-	var srcs, outs []string
+	fromDeps := gen.transitiveGenFiles(n, genFilesOf)
+	var srcs []string
+	var implicit []string
 	for _, s := range n.Target.AttrStrings("srcs") {
-		srcs = append(srcs, path.Join(pkg, s))
+		if gp, ok := fromDeps[s]; ok {
+			srcs = append(srcs, gp)
+			implicit = append(implicit, gp)
+		} else {
+			srcs = append(srcs, path.Join(pkg, s))
+		}
 	}
 	outMap := map[string]string{}
+	var outs []string
 	for _, o := range n.Target.AttrStrings("outs") {
 		op := path.Join(gen.BuildDir, pkg, o)
 		outs = append(outs, op)
 		outMap[o] = op
 	}
 	genFilesOf[n] = outMap
+	firstSrc := ""
+	if len(srcs) > 0 {
+		firstSrc = srcs[0]
+	}
 	cmd := strings.NewReplacer(
 		"$SRCS", strings.Join(srcs, " "),
 		"$OUTS", strings.Join(outs, " "),
+		"$OUT_DIR", path.Join(gen.BuildDir, pkg),
+		"$FIRST_SRC", firstSrc,
+		"$SRC_DIR", pkg,
 		"$BUILD_DIR", gen.BuildDir,
 	).Replace(n.Target.AttrString("cmd"))
-	f.AddBuild(ninja.Build{Outputs: outs, Rule: "gen", Inputs: srcs, Vars: map[string]string{"cmd": cmd}})
+	f.AddBuild(ninja.Build{Outputs: outs, Rule: "gen", Inputs: srcs, Implicit: implicit, Vars: map[string]string{"cmd": cmd}})
 }
 
 // transitiveGenFiles merges the out-name->path maps of all gen_rule deps, so a
@@ -213,6 +244,30 @@ func (gen *Generator) emitProto(f *ninja.File, n *graph.Node) (lib string, genHd
 	lib = gen.libPath(n)
 	f.AddBuild(ninja.Build{Outputs: []string{lib}, Rule: "ar", Inputs: objs})
 	return lib, genHdrs
+}
+
+// foreignInfo returns the static archive and consumer include dirs for a
+// foreign_cc_library, read from its gen_rule dependency (the cmake_build /
+// autotools_build that produced them). The header shims the build writes live at
+// <build>/<pkg>/<leaf>.h, so consumers that include "<pkg-leaf>/hdr" resolve via
+// -I<build>/<dirname(pkg)>; system_export_incs adds the raw install include dir.
+func (gen *Generator) foreignInfo(n *graph.Node, genFilesOf map[*graph.Node]map[string]string) (lib string, incs []string) {
+	for _, dep := range n.Deps {
+		if dep.Target.Type != "gen_rule" {
+			continue
+		}
+		for name, p := range genFilesOf[dep] {
+			if strings.HasSuffix(name, ".a") {
+				lib = p
+			}
+		}
+		pkg := dep.Target.Package
+		incs = append(incs, path.Join(gen.BuildDir, path.Dir(pkg)))
+		if sei := dep.Target.AttrString("system_export_incs"); sei != "" {
+			incs = append(incs, path.Join(gen.BuildDir, pkg, sei))
+		}
+	}
+	return lib, incs
 }
 
 // emitCompiles emits one compile edge per source and returns the object paths.
@@ -301,6 +356,12 @@ func (gen *Generator) includes(n *graph.Node) string {
 	var walk func(*graph.Node)
 	walk = func(node *graph.Node) {
 		for _, d := range node.Target.AttrStrings("export_incs") {
+			if !seen[d] {
+				seen[d] = true
+				dirs = append(dirs, d)
+			}
+		}
+		for _, d := range gen.foreignIncs[node] {
 			if !seen[d] {
 				seen[d] = true
 				dirs = append(dirs, d)
