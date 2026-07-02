@@ -86,6 +86,36 @@ func goStrings(v any) []string {
 	return out
 }
 
+// configureTestLibs resolves cc_test_config's gtest_libs / gtest_main_libs
+// (evaluating a lambda if that's how they're written) and classifies each entry:
+// a "#name" becomes a test syslib, a "thirdparty/<port>:<lib>" becomes a vcpkg
+// test lib. cc_test / cc_benchmark targets link these.
+func configureTestLibs(gen *cc.Generator, cfg *config.Config) {
+	blade := bladectx.BuildModule("", gen.BuildDir, cfg)
+	var labels []string
+	labels = append(labels, evalConfigList(cfg, "cc_test_config", "gtest_libs", blade)...)
+	labels = append(labels, evalConfigList(cfg, "cc_test_config", "gtest_main_libs", blade)...)
+	const prefix = "thirdparty/"
+	for _, s := range labels {
+		if strings.HasPrefix(s, "#") {
+			gen.TestSyslibs = append(gen.TestSyslibs, strings.TrimPrefix(s, "#"))
+			continue
+		}
+		lbl, err := label.Parse(s, "")
+		if err != nil {
+			continue
+		}
+		if strings.HasPrefix(lbl.Package, prefix) {
+			rest := strings.TrimPrefix(lbl.Package, prefix)
+			port := rest
+			if i := strings.IndexByte(rest, '/'); i >= 0 {
+				port = rest[:i]
+			}
+			gen.TestVcpkgs = append(gen.TestVcpkgs, label.VcpkgDep{Port: port, Lib: lbl.Name})
+		}
+	}
+}
+
 // configureProto applies proto_library_config (protoc path, protobuf_libs) to
 // the generator. Non-string / lambda values are ignored, keeping the defaults.
 func configureProto(gen *cc.Generator, cfg *config.Config) {
@@ -147,6 +177,7 @@ func plan(root string, targets []string) (*graph.Graph, *cc.Generator, *ninja.Fi
 	gen := cc.New(toolchain.Detect())
 	configureProto(gen, l.Config)
 	configureCcFlags(gen, l.Config)
+	configureTestLibs(gen, l.Config)
 	f, err := gen.Generate(g)
 	if err != nil {
 		return nil, nil, nil, err

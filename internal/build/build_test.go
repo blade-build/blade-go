@@ -314,3 +314,26 @@ cc_config(
 		}
 	}
 }
+
+func TestBuildCcTestLinksGtest(t *testing.T) {
+	root := writeWorkspace(t, map[string]string{
+		"BLADE_ROOT": `
+cc_test_config(
+    gtest_libs = ['//thirdparty/googletest:gtest', '#pthread'],
+    gtest_main_libs = ['//thirdparty/googletest:gtest_main'],
+)`,
+		"t/BUILD": `cc_test(name = 't', srcs = ['t.cc'])`,
+	})
+	ninjaFile, err := Build(root, []string{"//t:t"}, Options{RunNinja: false})
+	if err != nil {
+		t.Fatal(err)
+	}
+	data, _ := os.ReadFile(ninjaFile)
+	out := string(data)
+	// gtest/gtest_main routed to vcpkg (archive path or -lgtest); pthread as syslib.
+	for _, want := range []string{"gtest", "gtest_main", "-lpthread"} {
+		if !strings.Contains(out, want) {
+			t.Errorf("cc_test link missing %q:\n%s", want, out)
+		}
+	}
+}
