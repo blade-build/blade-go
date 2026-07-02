@@ -390,12 +390,19 @@ cc_test(name = 'fail', srcs = ['fail.cc'])
 			t.Fatal(err)
 		}
 	}
-	results, err := Test(root, []string{"//t:pass", "//t:fail"}, Options{})
+	// onResult must be called once per test as it finishes (streaming), before
+	// Test returns -- so a large suite shows progress instead of looking hung.
+	var streamed []string
+	results, err := Test(root, []string{"//t:pass", "//t:fail"}, Options{},
+		func(r TestResult) { streamed = append(streamed, r.Label) })
 	if err != nil {
 		t.Fatal(err)
 	}
 	if len(results) != 2 {
 		t.Fatalf("got %d results, want 2", len(results))
+	}
+	if len(streamed) != 2 {
+		t.Errorf("onResult called %d times, want 2 (results must stream)", len(streamed))
 	}
 	byLabel := map[string]bool{}
 	for _, r := range results {
