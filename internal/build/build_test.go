@@ -619,3 +619,36 @@ func TestClean(t *testing.T) {
 		t.Errorf("build dir still present after clean: %v", err)
 	}
 }
+
+func TestQuery(t *testing.T) {
+	// app -> lib -> base (base also //thirdparty/x -> vcpkg). Query deps and
+	// dependents over the whole-repo graph.
+	root := t.TempDir()
+	files := map[string]string{
+		"BLADE_ROOT": `cc_config()`,
+		"base/BUILD": `cc_library(name = 'base', srcs = ['b.cc'], visibility = ['PUBLIC'])`,
+		"lib/BUILD":  `cc_library(name = 'lib', srcs = ['l.cc'], deps = ['//base:base'], visibility = ['PUBLIC'])`,
+		"app/BUILD":  `cc_binary(name = 'app', srcs = ['m.cc'], deps = ['//lib:lib'])`,
+	}
+	for rel, content := range files {
+		p := filepath.Join(root, rel)
+		os.MkdirAll(filepath.Dir(p), 0o755)
+		os.WriteFile(p, []byte(content), 0o644)
+	}
+	// deps of app = lib + base.
+	res, err := Query(root, []string{"//app:app"}, false)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if want := []string{"//base:base", "//lib:lib"}; !reflect.DeepEqual(res[0].Related, want) {
+		t.Errorf("--deps //app:app = %v, want %v", res[0].Related, want)
+	}
+	// dependents of base = lib + app.
+	res, err = Query(root, []string{"//base:base"}, true)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if want := []string{"//app:app", "//lib:lib"}; !reflect.DeepEqual(res[0].Related, want) {
+		t.Errorf("--dependents //base:base = %v, want %v", res[0].Related, want)
+	}
+}

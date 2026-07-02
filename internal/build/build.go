@@ -7,6 +7,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"sort"
 	"strings"
 	"time"
 
@@ -265,24 +266,34 @@ func (t *timing) report(nodes int) {
 	fmt.Fprintf(os.Stderr, "  %-12s %v\n", "TOTAL", time.Since(t.start).Round(time.Millisecond))
 }
 
-// plan loads the workspace and produces the graph, generator, and ninja file for
-// the given targets (patterns are expanded to concrete labels, also returned).
-func plan(root string, targets []string) (*graph.Graph, *cc.Generator, *ninja.File, []string, error) {
-	tm := newTiming()
+// loadGraph loads BLADE_ROOT config and resolves the dependency graph for the
+// given target patterns (no ninja generation, no vcpkg install). Shared by plan
+// (which then generates) and Query (which only inspects the graph).
+func loadGraph(root string, targets []string) (*loader.Loader, *graph.Graph, []string, error) {
 	l := loader.New(root)
 	bladeRoot := filepath.Join(root, "BLADE_ROOT")
 	if _, err := os.Stat(bladeRoot); err == nil {
 		if err := l.LoadConfigFile(bladeRoot); err != nil {
-			return nil, nil, nil, nil, fmt.Errorf("BLADE_ROOT: %w", err)
+			return nil, nil, nil, fmt.Errorf("BLADE_ROOT: %w", err)
 		}
 	}
-	tm.mark("config")
 	b := graph.NewBuilder(l)
 	expanded, err := b.Expand(targets)
 	if err != nil {
-		return nil, nil, nil, nil, err
+		return nil, nil, nil, err
 	}
 	g, err := b.Build(expanded)
+	if err != nil {
+		return nil, nil, nil, err
+	}
+	return l, g, expanded, nil
+}
+
+// plan loads the workspace and produces the graph, generator, and ninja file for
+// the given targets (patterns are expanded to concrete labels, also returned).
+func plan(root string, targets []string) (*graph.Graph, *cc.Generator, *ninja.File, []string, error) {
+	tm := newTiming()
+	l, g, expanded, err := loadGraph(root, targets)
 	if err != nil {
 		return nil, nil, nil, nil, err
 	}
@@ -424,4 +435,60 @@ func Run(root, target string, args []string, opt Options) (int, error) {
 // Clean removes the build output directory.
 func Clean(root string) error {
 	return os.RemoveAll(filepath.Join(root, cc.New(toolchain.Detect()).BuildDir))
+}
+
+// QueryResult is one queried target and its related targets (sorted).
+type QueryResult struct {
+	Target  string
+	Related []string
+}
+
+// Query answers dependency questions over the whole-repo graph: for each target,
+// its transitive dependencies (dependents=false) or transitive dependents
+// (dependents=true, the reverse closure).
+func Query(root string, targets []string, dependents bool) ([]QueryResult, error) {
+	_, g, _, err := loadGraph(root, []string{"//..."})
+	if err != nil {
+		return nil, err
+	}
+	var reverse map[*graph.Node][]*graph.Node
+	if dependents {
+		reverse = map[*graph.Node][]*graph.Node{}
+		for _, n := range g.All() {
+			for _, d := range n.Deps {
+				reverse[d] = append(reverse[d], n)
+			}
+		}
+	}
+	var out []QueryResult
+	for _, t := range targets {
+		lbl, err := label.Parse(t, "")
+		if err != nil {
+			return nil, err
+		}
+		node := g.Node(lbl.String())
+		if node == nil {
+			return nil, fmt.Errorf("no such target %s", t)
+		}
+		var related []string
+		seen := map[*graph.Node]bool{}
+		var walk func(*graph.Node)
+		walk = func(n *graph.Node) {
+			next := n.Deps
+			if dependents {
+				next = reverse[n]
+			}
+			for _, d := range next {
+				if !seen[d] {
+					seen[d] = true
+					related = append(related, d.Label())
+					walk(d)
+				}
+			}
+		}
+		walk(node)
+		sort.Strings(related)
+		out = append(out, QueryResult{Target: node.Label(), Related: related})
+	}
+	return out, nil
 }
