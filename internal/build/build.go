@@ -366,8 +366,10 @@ type TestResult struct {
 }
 
 // Test builds the given targets and runs each that is a cc_test, returning one
-// result per test target (in request order).
-func Test(root string, targets []string, opt Options) ([]TestResult, error) {
+// result per test target (in request order). onResult, if non-nil, is called as
+// each test finishes -- so a caller can stream progress instead of waiting for
+// the whole (possibly slow) suite, which otherwise looks hung.
+func Test(root string, targets []string, opt Options, onResult func(TestResult)) ([]TestResult, error) {
 	g, gen, f, expanded, err := plan(root, targets)
 	if err != nil {
 		return nil, err
@@ -391,7 +393,11 @@ func Test(root string, targets []string, opt Options) ([]TestResult, error) {
 			continue
 		}
 		out, runErr := exec.Command(filepath.Join(root, gen.BinPath(node))).CombinedOutput()
-		results = append(results, TestResult{Label: node.Label(), Passed: runErr == nil, Output: string(out)})
+		res := TestResult{Label: node.Label(), Passed: runErr == nil, Output: string(out)}
+		if onResult != nil {
+			onResult(res)
+		}
+		results = append(results, res)
 	}
 	return results, nil
 }

@@ -51,7 +51,7 @@ func newRootCmd() *cobra.Command {
 		SilenceErrors: false,
 	}
 	root.CompletionOptions.DisableDefaultCmd = true
-	root.AddCommand(newBuildCmd(), newTestCmd(), newRunCmd(), newCleanCmd(), newQueryCmd())
+	root.AddCommand(newBuildCmd(), newTestCmd(), newRunCmd(), newCleanCmd(), newQueryCmd(), newVersionCmd())
 	return root
 }
 
@@ -161,20 +161,26 @@ func newTestCmd() *cobra.Command {
 				return err
 			}
 			_, nargs := bf.ninja()
-			results, err := build.Test(root, targets, build.Options{NinjaArgs: nargs})
-			if err != nil {
-				return err
-			}
-			passed := 0
-			for _, r := range results {
+			// Stream each result as it finishes so a large suite shows progress
+			// instead of looking hung until the last (possibly slow) test ends.
+			print := func(r build.TestResult) {
 				status := "FAIL"
 				if r.Passed {
-					passed++
 					status = "PASS"
 				}
 				fmt.Printf("%s %s\n", status, r.Label)
 				if !r.Passed {
 					fmt.Print(r.Output)
+				}
+			}
+			results, err := build.Test(root, targets, build.Options{NinjaArgs: nargs}, print)
+			if err != nil {
+				return err
+			}
+			passed := 0
+			for _, r := range results {
+				if r.Passed {
+					passed++
 				}
 			}
 			fmt.Printf("blade: %d/%d tests passed\n", passed, len(results))
@@ -279,6 +285,18 @@ func newCleanCmd() *cobra.Command {
 	}
 	c.FParseErrWhitelist.UnknownFlags = true // tolerate Blade's clean flags
 	return c
+}
+
+func newVersionCmd() *cobra.Command {
+	return &cobra.Command{
+		Use:   "version",
+		Short: "Print the blade-go version",
+		Args:  cobra.NoArgs,
+		RunE: func(cmd *cobra.Command, args []string) error {
+			fmt.Printf("blade-go %s\n", version.Version)
+			return nil
+		},
+	}
 }
 
 func workspaceRoot() (string, error) {
