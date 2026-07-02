@@ -262,3 +262,20 @@ func TestLinkExtrasFrameworks(t *testing.T) {
 		t.Errorf("Security should be deduped, count=%d: %v", n, got)
 	}
 }
+
+func TestLibArgManualLink(t *testing.T) {
+	// vcpkg puts archives that define main() (gtest_main) under lib/manual-link/;
+	// LibArg must find them there, not fall back to a broken -lgtest_main.
+	installed := t.TempDir()
+	ml := filepath.Join(installed, "lib", "manual-link")
+	if err := os.MkdirAll(ml, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(ml, "libgtest_main.a"), nil, 0o644); err != nil {
+		t.Fatal(err)
+	}
+	r := &Resolver{InstalledDir: installed}
+	if got := r.LibArg("gtest_main"); got != filepath.Join(ml, "libgtest_main.a") {
+		t.Errorf("LibArg(gtest_main)=%q, want the manual-link archive", got)
+	}
+}
