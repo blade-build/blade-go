@@ -234,3 +234,31 @@ func TestBuildIncludePrefixes(t *testing.T) {
 		t.Error("fmt has no include_prefix; should not get a symlink")
 	}
 }
+
+func TestLinkExtrasFrameworks(t *testing.T) {
+	// curl's .pc lists macOS frameworks in Libs: LinkExtras must surface them
+	// (deduped) so a binary linking libcurl resolves CoreFoundation/Security.
+	installed := t.TempDir()
+	pc := filepath.Join(installed, "lib", "pkgconfig")
+	if err := os.MkdirAll(pc, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(pc, "libcurl.pc"),
+		[]byte("Libs: -lcurl -framework Security -framework CoreFoundation\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(pc, "other.pc"),
+		[]byte("Libs: -lfoo -framework Security\n"), 0o644); err != nil { // dup Security
+		t.Fatal(err)
+	}
+	r := &Resolver{InstalledDir: installed}
+	got := r.LinkExtras()
+	joined := strings.Join(got, " ")
+	if !strings.Contains(joined, "-framework Security") || !strings.Contains(joined, "-framework CoreFoundation") {
+		t.Errorf("LinkExtras=%v, want the frameworks", got)
+	}
+	// Security appears once despite two .pc files.
+	if n := strings.Count(joined, "Security"); n != 1 {
+		t.Errorf("Security should be deduped, count=%d: %v", n, got)
+	}
+}

@@ -92,6 +92,44 @@ func (r *Resolver) ToolPath(port, tool string) string {
 	return filepath.Join(r.installed(), "tools", port, tool)
 }
 
+// LinkExtras returns extra linker flags the pinned ports declare in their
+// pkg-config files -- notably the macOS `-framework` flags curl's Secure
+// Transport / TLS backend needs (CoreFoundation, Security, ...). blade resolves
+// these the same way (blade-build #1337). Frameworks are de-duplicated; adding an
+// unused one is harmless.
+func (r *Resolver) LinkExtras() []string {
+	if !r.Configured() {
+		return nil
+	}
+	entries, err := os.ReadDir(filepath.Join(r.installed(), "lib", "pkgconfig"))
+	if err != nil {
+		return nil
+	}
+	seen := map[string]bool{}
+	var out []string
+	for _, e := range entries {
+		if !strings.HasSuffix(e.Name(), ".pc") {
+			continue
+		}
+		data, err := os.ReadFile(filepath.Join(r.installed(), "lib", "pkgconfig", e.Name()))
+		if err != nil {
+			continue
+		}
+		toks := strings.Fields(string(data))
+		for i := 0; i < len(toks); i++ {
+			if toks[i] == "-framework" && i+1 < len(toks) {
+				fw := toks[i+1]
+				if key := "-framework " + fw; !seen[key] {
+					seen[key] = true
+					out = append(out, "-framework", fw)
+				}
+				i++
+			}
+		}
+	}
+	return out
+}
+
 // ManifestJSON turns a BLADE_ROOT vcpkg_config into a vcpkg.json manifest so the
 // exact same ports/versions flare pins are installed. `baseline` is the vcpkg
 // builtin baseline commit; `packages` maps a port name to either a version
@@ -303,6 +341,16 @@ func (r *Resolver) InstallFromConfig(baseline string, packages map[string]any, m
 		r.InstalledDir = tree
 		if err := r.buildIncludePrefixes(packages, manifestDir); err != nil {
 			return err
+		}
+		// flare's build_rules.bld resolves a `vcpkg#` protoc to
+		// `$BUILD_DIR/.cache/vcpkg/installed/blade-*/tools/protobuf/protoc`
+		// (blade's overlay-triplet layout). Expose the pinned tree under a
+		// matching `blade-*` dir so that glob resolves for cc_flare_library.
+		buildDir := filepath.Dir(manifestDir)
+		compat := filepath.Join(buildDir, ".cache", "vcpkg", "installed", "blade-go")
+		if err := os.MkdirAll(filepath.Dir(compat), 0o755); err == nil {
+			os.Remove(compat)
+			os.Symlink(r.InstalledDir, compat)
 		}
 	}
 	if runErr != nil {
