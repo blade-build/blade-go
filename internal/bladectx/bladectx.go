@@ -90,6 +90,12 @@ func BuildModule(pkg, buildDir string, cfg ConfigGetter) starlark.Value {
 	members["current_source_dir"] = pkgDirBuiltin("blade.current_source_dir", "", pkg)
 	members["current_target_dir"] = pkgDirBuiltin("blade.current_target_dir", buildDir, pkg)
 	members["config"] = configModule(cfg)
+	// blade.workspace.build_dir -- flare's cc_config extra_incs lambda uses it
+	// ('%s/thirdparty/' % blade.workspace.build_dir). Without it the lambda
+	// throws and every extra_incs (incl. the global -Ithirdparty) is dropped.
+	members["workspace"] = starlarkstruct.FromStringDict(starlarkstruct.Default, starlark.StringDict{
+		"build_dir": starlark.String(buildDir),
+	})
 	members["build_type"] = starlark.String("release")
 	members["build_type_is_debug"] = starlark.NewBuiltin("blade.build_type_is_debug", func(_ *starlark.Thread, b *starlark.Builtin, args starlark.Tuple, kwargs []starlark.Tuple) (starlark.Value, error) {
 		return starlark.False, nil
