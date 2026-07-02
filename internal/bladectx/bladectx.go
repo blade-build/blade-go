@@ -82,8 +82,13 @@ type ConfigGetter interface {
 func BuildModule(pkg, buildDir string, cfg ConfigGetter) starlark.Value {
 	members := commonMembers()
 	members["cc_toolchain"] = ccToolchain()
-	members["current_source_dir"] = dirBuiltin("blade.current_source_dir", pkg)
-	members["current_target_dir"] = dirBuiltin("blade.current_target_dir", path.Join(buildDir, pkg))
+	// current_source_dir / current_target_dir must reflect the package of the
+	// BUILD file being executed, not the one BuildModule was constructed with:
+	// a .bld macro (foreign_build's cmake_build) runs on the consuming BUILD
+	// file's thread. Read the package from the thread-local the loader sets,
+	// falling back to the static pkg (blade.conf / tests that set no thread pkg).
+	members["current_source_dir"] = pkgDirBuiltin("blade.current_source_dir", "", pkg)
+	members["current_target_dir"] = pkgDirBuiltin("blade.current_target_dir", buildDir, pkg)
 	members["config"] = configModule(cfg)
 	members["build_type"] = starlark.String("release")
 	members["build_type_is_debug"] = starlark.NewBuiltin("blade.build_type_is_debug", func(_ *starlark.Thread, b *starlark.Builtin, args starlark.Tuple, kwargs []starlark.Tuple) (starlark.Value, error) {
@@ -144,10 +149,45 @@ func GoToStarlark(v any) starlark.Value {
 }
 
 func ccToolchain() starlark.Value {
+	dynSuffix := ".so"
+	if HostOS() == "darwin" {
+		dynSuffix = ".dylib"
+	}
 	return starlarkstruct.FromStringDict(starlarkstruct.Default, starlark.StringDict{
-		"target_os":   starlark.String(HostOS()),
-		"target_arch": starlark.String(HostArch()),
+		"target_os":          starlark.String(HostOS()),
+		"target_arch":        starlark.String(HostArch()),
+		"dynamic_lib_suffix": starlark.String(dynSuffix),
+		"tool":               toolBuiltin(),
 	})
+}
+
+// toolBuiltin implements blade.cc_toolchain.tool(name): the resolved compiler /
+// archiver the foreign-build macros pass to configure/cmake. Matches the
+// env-or-default resolution the Go toolchain uses; unknown names return None
+// (the macros fall back with `or 'cc'`).
+func toolBuiltin() *starlark.Builtin {
+	return starlark.NewBuiltin("blade.cc_toolchain.tool", func(_ *starlark.Thread, b *starlark.Builtin, args starlark.Tuple, kwargs []starlark.Tuple) (starlark.Value, error) {
+		var name string
+		if err := starlark.UnpackArgs(b.Name(), args, kwargs, "name", &name); err != nil {
+			return nil, err
+		}
+		switch name {
+		case "cc":
+			return starlark.String(pickEnv("CC", "cc")), nil
+		case "cxx":
+			return starlark.String(pickEnv("CXX", "c++")), nil
+		case "ar":
+			return starlark.String(pickEnv("AR", "ar")), nil
+		}
+		return starlark.None, nil
+	})
+}
+
+func pickEnv(env, def string) string {
+	if v := os.Getenv(env); v != "" {
+		return v
+	}
+	return def
 }
 
 // BuildTarget returns the `build_target` object BUILD files use for
@@ -165,6 +205,26 @@ func dirBuiltin(name, result string) *starlark.Builtin {
 			return nil, err
 		}
 		return starlark.String(result), nil
+	})
+}
+
+// threadPkgKey mirrors the loader's thread-local key for the executing BUILD
+// file's package (kept as a literal to avoid a bladectx->loader import cycle).
+const threadPkgKey = "blade.pkg"
+
+// pkgDirBuiltin returns blade.current_{source,target}_dir: at call time it joins
+// prefix ("" for source, the build dir for target) with the thread's current
+// package, so the path tracks whichever BUILD file is executing.
+func pkgDirBuiltin(name, prefix, staticPkg string) *starlark.Builtin {
+	return starlark.NewBuiltin(name, func(t *starlark.Thread, b *starlark.Builtin, args starlark.Tuple, kwargs []starlark.Tuple) (starlark.Value, error) {
+		if err := starlark.UnpackArgs(b.Name(), args, kwargs); err != nil {
+			return nil, err
+		}
+		pkg := staticPkg
+		if v, ok := t.Local(threadPkgKey).(string); ok {
+			pkg = v
+		}
+		return starlark.String(path.Join(prefix, pkg)), nil
 	})
 }
 

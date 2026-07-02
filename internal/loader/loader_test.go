@@ -282,6 +282,46 @@ my_rpc_library(name = 'svc', srcs = ['svc.proto'], deps = ['//base:base'])
 	}
 }
 
+func TestIncludeMacro(t *testing.T) {
+	// include('//path.bld') splices the .bld's defs into the calling BUILD's
+	// namespace (flare's foreign_build.bld idiom). The included macro calls a
+	// bare rule (gen_rule) and reads blade.current_target_dir() +
+	// blade.cc_toolchain.tool(), both of which must reflect the *calling*
+	// package / host toolchain.
+	t.Setenv("CC", "my-cc")
+	root := workspace(t, map[string]string{
+		"BLADE_ROOT": `cc_config()`,
+		"thirdparty/foreign.bld": `
+def pkg_build(name):
+    cc = blade.cc_toolchain.tool('cc')
+    gen_rule(name = name, outs = [name + '.stamp'],
+             cmd = cc + ' @ ' + blade.current_target_dir())
+`,
+		"thirdparty/jsoncpp/BUILD": `
+include('//thirdparty/foreign.bld')
+pkg_build(name = 'jsoncpp_build')
+`,
+	})
+	l := New(root)
+	if err := l.LoadConfigFile(filepath.Join(root, "BLADE_ROOT")); err != nil {
+		t.Fatal(err)
+	}
+	if err := l.LoadBuildFile(filepath.Join(root, "thirdparty/jsoncpp/BUILD")); err != nil {
+		t.Fatalf("include-based BUILD failed to load: %v", err)
+	}
+	g := l.Targets.Get("//thirdparty/jsoncpp:jsoncpp_build")
+	if g == nil || g.Type != "gen_rule" {
+		t.Fatalf("gen_rule from included macro not registered in the calling package; labels=%v", l.Targets.Labels())
+	}
+	cmd := g.AttrString("cmd")
+	if !strings.Contains(cmd, "my-cc @ ") {
+		t.Errorf("cc_toolchain.tool('cc') not resolved from env: cmd=%q", cmd)
+	}
+	if !strings.Contains(cmd, "build64_release/thirdparty/jsoncpp") {
+		t.Errorf("current_target_dir should reflect the calling package: cmd=%q", cmd)
+	}
+}
+
 func TestLoadMissingExtension(t *testing.T) {
 	root := workspace(t, map[string]string{
 		"app/BUILD": `load('//nope/missing.bld', 'x')`,
