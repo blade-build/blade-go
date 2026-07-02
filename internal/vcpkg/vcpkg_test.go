@@ -1,7 +1,9 @@
 package vcpkg
 
 import (
+	"crypto/md5"
 	"encoding/json"
+	"fmt"
 	"os"
 	"path/filepath"
 	"reflect"
@@ -144,7 +146,11 @@ func TestWriteOverlayTriplet(t *testing.T) {
 		"fmt":    "7.1.3", // no cmake_options -> no branch
 	}
 	dir := t.TempDir()
-	overlay, err := r.writeOverlayTriplet(packages, dir)
+	content, err := r.overlayTripletContent(packages)
+	if err != nil {
+		t.Fatal(err)
+	}
+	overlay, err := r.writeOverlayTriplet(content, dir)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -174,12 +180,19 @@ func TestWriteOverlayTriplet(t *testing.T) {
 
 func TestWriteOverlayTripletNoOptions(t *testing.T) {
 	r := &Resolver{Root: t.TempDir(), Triplet: "arm64-osx"}
-	overlay, err := r.writeOverlayTriplet(map[string]any{"fmt": "7.1.3"}, t.TempDir())
+	content, err := r.overlayTripletContent(map[string]any{"fmt": "7.1.3"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if content != "" {
+		t.Errorf("no cmake_options should mean no overlay content, got %q", content)
+	}
+	overlay, err := r.writeOverlayTriplet(content, t.TempDir())
 	if err != nil {
 		t.Fatal(err)
 	}
 	if overlay != "" {
-		t.Errorf("no cmake_options should mean no overlay, got %q", overlay)
+		t.Errorf("no content should mean no overlay dir, got %q", overlay)
 	}
 }
 
@@ -277,5 +290,37 @@ func TestLibArgManualLink(t *testing.T) {
 	r := &Resolver{InstalledDir: installed}
 	if got := r.LibArg("gtest_main"); got != filepath.Join(ml, "libgtest_main.a") {
 		t.Errorf("LibArg(gtest_main)=%q, want the manual-link archive", got)
+	}
+}
+
+func TestInstallFromConfigSkipsWhenStamped(t *testing.T) {
+	// A present tree + a matching stamp must skip `vcpkg install` entirely --
+	// no vcpkg executable is even consulted (mirrors blade's MD5-stamp skip).
+	manifestDir := t.TempDir()
+	triplet := "test-triplet"
+	tree := filepath.Join(manifestDir, "vcpkg_installed", triplet)
+	if err := os.MkdirAll(filepath.Join(tree, "include"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	r := &Resolver{Triplet: triplet} // no Root/exe on purpose
+	packages := map[string]any{"fmt": "7.1.3"}
+	manifest, _ := ManifestJSON("", packages)
+	overlay, _ := r.overlayTripletContent(packages)
+	stamp := fmt.Sprintf("%x", md5.Sum([]byte(string(manifest)+overlay+triplet)))
+	if err := os.WriteFile(filepath.Join(manifestDir, ".blade-go-vcpkg-stamp"), []byte(stamp), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := r.InstallFromConfig("", packages, manifestDir); err != nil {
+		t.Fatalf("stamped install should skip cleanly: %v", err)
+	}
+	if r.InstalledDir != tree {
+		t.Errorf("InstalledDir=%q, want the pinned tree %q", r.InstalledDir, tree)
+	}
+
+	// Without the stamp, it must NOT skip -- and with no vcpkg exe, that errors.
+	os.Remove(filepath.Join(manifestDir, ".blade-go-vcpkg-stamp"))
+	r2 := &Resolver{Triplet: triplet}
+	if err := r2.InstallFromConfig("", packages, manifestDir); err == nil {
+		t.Error("without a stamp it should try to install (and fail: no vcpkg exe)")
 	}
 }

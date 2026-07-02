@@ -7,6 +7,7 @@
 package vcpkg
 
 import (
+	"crypto/md5"
 	"encoding/json"
 	"fmt"
 	"os"
@@ -228,7 +229,7 @@ func cmakeOptions(v any) []string {
 // VCPKG_CMAKE_CONFIGURE_OPTIONS branch (vcpkg triplets can switch on ${PORT}).
 // This is how blade-go applies flare's cmake_options -- vcpkg.json has no
 // per-port configure knob. Returns the overlay dir, or "" if nothing needs it.
-func (r *Resolver) writeOverlayTriplet(packages map[string]any, dir string) (string, error) {
+func (r *Resolver) overlayTripletContent(packages map[string]any) (string, error) {
 	perPort := map[string][]string{}
 	for name, spec := range packages {
 		if opts := cmakeOptions(spec); len(opts) > 0 {
@@ -257,11 +258,18 @@ func (r *Resolver) writeOverlayTriplet(packages map[string]any, dir string) (str
 		}
 		b.WriteString("endif()\n")
 	}
+	return b.String(), nil
+}
+
+func (r *Resolver) writeOverlayTriplet(content, dir string) (string, error) {
+	if content == "" {
+		return "", nil
+	}
 	overlay := filepath.Join(dir, "overlay-triplets")
 	if err := os.MkdirAll(overlay, 0o755); err != nil {
 		return "", err
 	}
-	if err := os.WriteFile(filepath.Join(overlay, r.Triplet+".cmake"), []byte(b.String()), 0o644); err != nil {
+	if err := os.WriteFile(filepath.Join(overlay, r.Triplet+".cmake"), []byte(content), 0o644); err != nil {
 		return "", err
 	}
 	return overlay, nil
@@ -305,15 +313,34 @@ func (r *Resolver) FindExe() string {
 // manifestDir/vcpkg_installed. On success it points the Resolver at that tree
 // (via InstalledDir) so headers/archives resolve to the flare-pinned versions.
 //
-// It is idempotent: vcpkg skips ports already installed for the manifest.
+// A stamp over the manifest + overlay triplet skips `vcpkg install` when nothing
+// relevant changed and the tree is present (mirrors blade's vcpkg.setup): the
+// idempotent install still spawns vcpkg and re-resolves the manifest (~1s warm,
+// ~40s cold), so skipping it makes a warm build's front-end near-instant.
 func (r *Resolver) InstallFromConfig(baseline string, packages map[string]any, manifestDir string) error {
-	exe := r.FindExe()
-	if exe == "" {
-		return fmt.Errorf("vcpkg executable not found (set VCPKG_ROOT or put vcpkg on PATH)")
-	}
 	manifest, err := ManifestJSON(baseline, packages)
 	if err != nil {
 		return err
+	}
+	overlayContent, err := r.overlayTripletContent(packages)
+	if err != nil {
+		return err
+	}
+	installRoot := filepath.Join(manifestDir, "vcpkg_installed")
+	tree := filepath.Join(installRoot, r.Triplet)
+	stamp := fmt.Sprintf("%x", md5.Sum([]byte(string(manifest)+overlayContent+r.Triplet)))
+	stampFile := filepath.Join(manifestDir, ".blade-go-vcpkg-stamp")
+
+	// Fresh: the tree exists and the inputs are unchanged -> skip the install.
+	if _, statErr := os.Stat(filepath.Join(tree, "include")); statErr == nil {
+		if b, e := os.ReadFile(stampFile); e == nil && strings.TrimSpace(string(b)) == stamp {
+			return r.useTree(tree, packages, manifestDir)
+		}
+	}
+
+	exe := r.FindExe()
+	if exe == "" {
+		return fmt.Errorf("vcpkg executable not found (set VCPKG_ROOT or put vcpkg on PATH)")
 	}
 	if err := os.MkdirAll(manifestDir, 0o755); err != nil {
 		return err
@@ -321,12 +348,11 @@ func (r *Resolver) InstallFromConfig(baseline string, packages map[string]any, m
 	if err := os.WriteFile(filepath.Join(manifestDir, "vcpkg.json"), manifest, 0o644); err != nil {
 		return err
 	}
-	installRoot := filepath.Join(manifestDir, "vcpkg_installed")
 	args := []string{"install",
 		"--triplet=" + r.Triplet,
 		"--x-manifest-root=" + manifestDir,
 		"--x-install-root=" + installRoot}
-	if overlay, err := r.writeOverlayTriplet(packages, manifestDir); err != nil {
+	if overlay, err := r.writeOverlayTriplet(overlayContent, manifestDir); err != nil {
 		return err
 	} else if overlay != "" {
 		args = append(args, "--overlay-triplets="+overlay)
@@ -338,27 +364,37 @@ func (r *Resolver) InstallFromConfig(baseline string, packages map[string]any, m
 
 	// Use the pinned tree whenever it materialized, even on a partial failure:
 	// the ports that installed (with their flare-pinned versions) must take
-	// precedence over any stale global $VCPKG_ROOT/installed tree. Falling back
-	// to that would silently undo the whole point of vcpkg_config.
-	tree := filepath.Join(installRoot, r.Triplet)
+	// precedence over any stale global $VCPKG_ROOT/installed tree.
 	if _, statErr := os.Stat(filepath.Join(tree, "include")); statErr == nil {
-		r.InstalledDir = tree
-		if err := r.buildIncludePrefixes(packages, manifestDir); err != nil {
+		if err := r.useTree(tree, packages, manifestDir); err != nil {
 			return err
 		}
-		// flare's build_rules.bld resolves a `vcpkg#` protoc to
-		// `$BUILD_DIR/.cache/vcpkg/installed/blade-*/tools/protobuf/protoc`
-		// (blade's overlay-triplet layout). Expose the pinned tree under a
-		// matching `blade-*` dir so that glob resolves for cc_flare_library.
-		buildDir := filepath.Dir(manifestDir)
-		compat := filepath.Join(buildDir, ".cache", "vcpkg", "installed", "blade-go")
-		if err := os.MkdirAll(filepath.Dir(compat), 0o755); err == nil {
-			os.Remove(compat)
-			os.Symlink(r.InstalledDir, compat)
+		if runErr == nil { // only stamp a complete install
+			os.WriteFile(stampFile, []byte(stamp), 0o644)
 		}
 	}
 	if runErr != nil {
 		return fmt.Errorf("vcpkg install: %w", runErr)
+	}
+	return nil
+}
+
+// useTree points the resolver at a materialized pinned tree: sets InstalledDir,
+// builds the include-prefix shims, and exposes it under a `blade-*` path for
+// flare's cc_flare_library protoc glob.
+func (r *Resolver) useTree(tree string, packages map[string]any, manifestDir string) error {
+	r.InstalledDir = tree
+	if err := r.buildIncludePrefixes(packages, manifestDir); err != nil {
+		return err
+	}
+	// flare's build_rules.bld resolves a `vcpkg#` protoc to
+	// `$BUILD_DIR/.cache/vcpkg/installed/blade-*/tools/protobuf/protoc` (blade's
+	// overlay-triplet layout). Expose the pinned tree under a matching `blade-*`
+	// dir so that glob resolves for cc_flare_library.
+	compat := filepath.Join(filepath.Dir(manifestDir), ".cache", "vcpkg", "installed", "blade-go")
+	if err := os.MkdirAll(filepath.Dir(compat), 0o755); err == nil {
+		os.Remove(compat)
+		os.Symlink(r.InstalledDir, compat)
 	}
 	return nil
 }
