@@ -51,7 +51,7 @@ func newRootCmd() *cobra.Command {
 		SilenceErrors: false,
 	}
 	root.CompletionOptions.DisableDefaultCmd = true
-	root.AddCommand(newBuildCmd(), newTestCmd())
+	root.AddCommand(newBuildCmd(), newTestCmd(), newRunCmd(), newCleanCmd())
 	return root
 }
 
@@ -185,6 +185,59 @@ func newTestCmd() *cobra.Command {
 		},
 	}
 	bf.register(c)
+	return c
+}
+
+func newRunCmd() *cobra.Command {
+	var bf buildFlags
+	c := &cobra.Command{
+		Use:   "run [flags] <target> [-- args...]",
+		Short: "Build a single target and run it (args after -- go to the program)",
+		Args:  cobra.MinimumNArgs(1),
+		RunE: func(cmd *cobra.Command, args []string) error {
+			// Split targets from program args at the "--" separator.
+			target, progArgs := args[0], []string{}
+			if dash := cmd.ArgsLenAtDash(); dash >= 0 {
+				target = args[dash-1]
+				progArgs = args[dash:]
+			}
+			root, err := workspaceRoot()
+			if err != nil {
+				return err
+			}
+			_, nargs := bf.ninja()
+			code, err := build.Run(root, target, progArgs, build.Options{NinjaArgs: nargs})
+			if err != nil {
+				return err
+			}
+			if code != 0 {
+				os.Exit(code)
+			}
+			return nil
+		},
+	}
+	bf.register(c)
+	return c
+}
+
+func newCleanCmd() *cobra.Command {
+	c := &cobra.Command{
+		Use:   "clean",
+		Short: "Remove the build output directory",
+		Args:  cobra.NoArgs,
+		RunE: func(cmd *cobra.Command, args []string) error {
+			root, err := workspaceRoot()
+			if err != nil {
+				return err
+			}
+			if err := build.Clean(root); err != nil {
+				return err
+			}
+			fmt.Println("blade: cleaned")
+			return nil
+		},
+	}
+	c.FParseErrWhitelist.UnknownFlags = true // tolerate Blade's clean flags
 	return c
 }
 

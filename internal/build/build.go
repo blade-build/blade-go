@@ -384,3 +384,44 @@ func Test(root string, targets []string, opt Options) ([]TestResult, error) {
 	}
 	return results, nil
 }
+
+// Run builds a single runnable target (cc_binary or cc_test) and executes it,
+// forwarding args and the current stdio; it returns the program's exit code.
+func Run(root, target string, args []string, opt Options) (int, error) {
+	g, gen, f, _, err := plan(root, []string{target})
+	if err != nil {
+		return 1, err
+	}
+	buildFile, err := writeNinja(root, gen, f)
+	if err != nil {
+		return 1, err
+	}
+	if err := runNinja(root, buildFile, opt.NinjaArgs...); err != nil {
+		return 1, err
+	}
+	lbl, err := label.Parse(target, "")
+	if err != nil {
+		return 1, err
+	}
+	node := g.Node(lbl.String())
+	if node == nil {
+		return 1, fmt.Errorf("no such target %s", target)
+	}
+	if t := node.Target.Type; t != "cc_binary" && t != "cc_test" {
+		return 1, fmt.Errorf("%s is a %s, not a runnable binary", target, t)
+	}
+	cmd := exec.Command(filepath.Join(root, gen.BinPath(node)), args...)
+	cmd.Stdin, cmd.Stdout, cmd.Stderr = os.Stdin, os.Stdout, os.Stderr
+	if err := cmd.Run(); err != nil {
+		if exit, ok := err.(*exec.ExitError); ok {
+			return exit.ExitCode(), nil // propagate the program's exit code
+		}
+		return 1, err
+	}
+	return 0, nil
+}
+
+// Clean removes the build output directory.
+func Clean(root string) error {
+	return os.RemoveAll(filepath.Join(root, cc.New(toolchain.Detect()).BuildDir))
+}

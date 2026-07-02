@@ -605,3 +605,17 @@ func TestBuildDefines(t *testing.T) {
 		t.Errorf("per-target defs not applied:\n%s", out)
 	}
 }
+
+func TestClean(t *testing.T) {
+	root := t.TempDir()
+	bd := filepath.Join(root, "build64_release")
+	if err := os.MkdirAll(filepath.Join(bd, "x"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := Clean(root); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := os.Stat(bd); !os.IsNotExist(err) {
+		t.Errorf("build dir still present after clean: %v", err)
+	}
+}
