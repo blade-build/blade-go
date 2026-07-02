@@ -80,7 +80,15 @@ func (gen *Generator) Generate(g *graph.Graph) (*ninja.File, error) {
 	for _, n := range sorted {
 		switch {
 		case n.Target.Type == "gen_rule":
-			gen.emitGenRule(f, n, genFilesOf)
+			gen.emitGenRule(f, n, genFilesOf, libOf)
+			// A gen_rule that emits headers (flare's cc_flare_library codegen
+			// produces .flare.pb.h) exposes them as generated headers so a
+			// consumer's compile waits for the codegen.
+			for name, p := range genFilesOf[n] {
+				if isHeader(name) {
+					genHdrsOf[n] = append(genHdrsOf[n], p)
+				}
+			}
 		case n.Target.Type == "foreign_cc_library":
 			// A source-built thirdparty library (jsoncpp): its gen_rule dep
 			// produced the archive + header shims. Contribute the archive to
@@ -99,18 +107,23 @@ func (gen *Generator) Generate(g *graph.Graph) (*ninja.File, error) {
 			libOf[n] = lib
 			genHdrsOf[n] = hdrs
 		case IsCC(n.Target.Type):
-			objs := gen.emitCompiles(f, n, gen.transitiveGenHdrs(n, genHdrsOf), gen.transitiveGenFiles(n, genFilesOf))
+			objs, checkObjs := gen.emitCompiles(f, n, gen.transitiveGenHdrs(n, genHdrsOf), gen.transitiveGenFiles(n, genFilesOf))
 			if n.Target.Type == "cc_library" {
 				if len(objs) == 0 {
-					// Header-only library: no sources, so no archive to link.
+					// Header-only library (only headers in srcs, or none): no
+					// archive to link. The self-sufficiency check objects are not
+					// linked anywhere, so nothing references them -- skip.
 					continue
 				}
 				lib := gen.libPath(n)
-				f.AddBuild(ninja.Build{Outputs: []string{lib}, Rule: "ar", Inputs: objs})
+				// checkObjs (compiled headers) are implicit so the check runs, but
+				// are NOT archived -- ld rejects an empty header object.
+				f.AddBuild(ninja.Build{Outputs: []string{lib}, Rule: "ar", Inputs: objs, Implicit: checkObjs})
 				libOf[n] = lib
 				continue
 			}
 			libs, implicit := gen.transitiveLibs(n, libOf)
+			implicit = append(implicit, checkObjs...)
 			syslibs := gen.transitiveSyslibs(n)
 			vcpkgArgs := gen.vcpkgLinkArgs(n)
 			if gen.hasProtoInClosure(n) {
@@ -126,6 +139,11 @@ func (gen *Generator) Generate(g *graph.Graph) (*ninja.File, error) {
 					vcpkgArgs = append(vcpkgArgs, gen.Vcpkg.LibArg(v.Lib))
 				}
 				syslibs = uniqueStrings(append(syslibs, gen.TestSyslibs...))
+			}
+			// Extra link flags the pinned ports declare (macOS -framework for
+			// curl's TLS backend). Only needed once vcpkg archives are linked.
+			if len(vcpkgArgs) > 0 {
+				vcpkgArgs = append(vcpkgArgs, gen.Vcpkg.LinkExtras()...)
 			}
 			f.AddBuild(ninja.Build{
 				Outputs:  []string{gen.binPath(n)},
@@ -222,7 +240,7 @@ func (gen *Generator) emitResourceLibrary(f *ninja.File, n *graph.Node) (lib str
 // chains in foreign_build) resolves to that build path and becomes an implicit
 // dep, so ninja orders the chain. The command sees the blade gen_rule variables
 // $SRCS/$OUTS/$OUT_DIR/$FIRST_SRC/$SRC_DIR/$BUILD_DIR.
-func (gen *Generator) emitGenRule(f *ninja.File, n *graph.Node, genFilesOf map[*graph.Node]map[string]string) {
+func (gen *Generator) emitGenRule(f *ninja.File, n *graph.Node, genFilesOf map[*graph.Node]map[string]string, libOf map[*graph.Node]string) {
 	pkg := n.Target.Package
 	fromDeps := gen.transitiveGenFiles(n, genFilesOf)
 	var srcs []string
@@ -235,12 +253,18 @@ func (gen *Generator) emitGenRule(f *ninja.File, n *graph.Node, genFilesOf map[*
 			srcs = append(srcs, path.Join(pkg, s))
 		}
 	}
-	// Order after every dep gen_rule, even ones wired only through `deps` (not
-	// srcs): autotools_build's make step depends on the configure step via deps
-	// alone, and must not run before configure writes the Makefile.
+	// Order after each dep's primary output, even deps wired only through the
+	// `deps` attr (not srcs): a gen_rule dep's generated files (autotools make
+	// after configure), a cc_binary dep's binary (flare's cc_flare_library codegen
+	// runs the built v2_plugin), or a cc_library dep's archive.
 	for _, dep := range n.Deps {
 		for _, op := range genFilesOf[dep] {
 			implicit = append(implicit, op)
+		}
+		if IsCC(dep.Target.Type) && dep.Target.Type != "cc_library" {
+			implicit = append(implicit, gen.binPath(dep))
+		} else if lib, ok := libOf[dep]; ok {
+			implicit = append(implicit, lib)
 		}
 	}
 	outMap := map[string]string{}
@@ -337,13 +361,14 @@ func (gen *Generator) foreignInfo(n *graph.Node, genFilesOf map[*graph.Node]map[
 	return lib, incs
 }
 
-// emitCompiles emits one compile edge per source and returns the object paths.
-// implicitHdrs (generated proto headers in the closure) are added as implicit
-// deps so codegen is ordered before compilation. A source that names a generated
-// file (in genFiles) compiles from its build-dir path instead of the source tree.
-func (gen *Generator) emitCompiles(f *ninja.File, n *graph.Node, implicitHdrs []string, genFiles map[string]string) []string {
+// emitCompiles emits one compile edge per source. It returns the linkable object
+// paths and, separately, the header self-sufficiency-check objects: a header in
+// srcs is compiled standalone (blade's check) but its object must NOT be archived
+// or linked -- it is (often) an empty object ld rejects as "not a mach-o file".
+// implicitHdrs (generated proto headers in the closure) order codegen before
+// compilation; a src naming a generated file compiles from its build-dir path.
+func (gen *Generator) emitCompiles(f *ninja.File, n *graph.Node, implicitHdrs []string, genFiles map[string]string) (objs, checkObjs []string) {
 	inc := gen.includes(n)
-	var objs []string
 	for _, src := range n.Target.AttrStrings("srcs") {
 		srcPath := path.Join(n.Target.Package, src)
 		if gp, ok := genFiles[src]; ok {
@@ -351,10 +376,10 @@ func (gen *Generator) emitCompiles(f *ninja.File, n *graph.Node, implicitHdrs []
 		}
 		obj := path.Join(gen.BuildDir, n.Target.Package, n.Target.Name+".objs", src) + gen.Tc.ObjSuffix()
 		rule := "cc"
-		// Headers are compiled standalone (blade's self-sufficiency check) with
-		// the target's language, which for cc_* is C++ -- they pull in <memory>
-		// and friends. Only a bare .c stays on the C compiler.
-		if isCXXSource(src) || isHeader(src) {
+		// Headers compile standalone with the target's language, which for cc_*
+		// is C++ (they pull in <memory>); only a bare .c stays on the C compiler.
+		header := isHeader(src)
+		if isCXXSource(src) || header {
 			rule = "cxx"
 		}
 		f.AddBuild(ninja.Build{
@@ -362,9 +387,13 @@ func (gen *Generator) emitCompiles(f *ninja.File, n *graph.Node, implicitHdrs []
 			Implicit: implicitHdrs,
 			Vars:     map[string]string{"includes": inc},
 		})
-		objs = append(objs, obj)
+		if header {
+			checkObjs = append(checkObjs, obj) // built as a check, never linked
+		} else {
+			objs = append(objs, obj)
+		}
 	}
-	return objs
+	return objs, checkObjs
 }
 
 // transitiveGenHdrs collects the generated headers of all proto_library deps.

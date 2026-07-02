@@ -58,6 +58,7 @@ known.
 | 8h | source-built thirdparty: `include()`, `cmake_build` (jsoncpp) + `autotools_build` (ctemplate) via `foreign_cc_library` | ✅ |
 | 8i | RPC graph: `legacy_public_targets`, header self-sufficiency (C++), vcpkg `include_prefix`, `resource_library` codegen | ✅ |
 | 8j | **`//flare/rpc:rpc` — the full flare RPC library — compiles end-to-end** | ✅ |
+| 8k | **`//flare/example/rpc:server` — a full RPC server binary links & runs** (cc_flare_library codegen, header-check separation, pkg-config -framework) | ✅ |
 
 Each phase is one PR, merged after CI is green.
 
