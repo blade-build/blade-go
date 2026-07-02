@@ -307,3 +307,32 @@ func TestBuildTarget(t *testing.T) {
 		t.Errorf("srcs=%v (expected base.cc + one arch source)", srcs)
 	}
 }
+
+func TestIsinstance(t *testing.T) {
+	root := workspace(t, map[string]string{
+		"p/BUILD": `
+_a = ['x.cc'] if isinstance(['a'], list) else []
+_b = ['y.cc'] if isinstance('s', str) else []
+_c = ['z.cc'] if isinstance('s', list) else []
+cc_library(name = 'p', srcs = _a + _b + _c)
+`,
+	})
+	l := New(root)
+	if err := l.LoadBuildFile(filepath.Join(root, "p/BUILD")); err != nil {
+		t.Fatal(err)
+	}
+	srcs := l.Targets.Get("//p:p").AttrStrings("srcs")
+	// list->x.cc, str->y.cc, ('s' is not list)->no z.cc
+	if len(srcs) != 2 || srcs[0] != "x.cc" || srcs[1] != "y.cc" {
+		t.Errorf("isinstance results wrong: srcs=%v", srcs)
+	}
+}
+
+func TestIsinstanceErrors(t *testing.T) {
+	root := workspace(t, map[string]string{
+		"p/BUILD": `cc_library(name = 'p', srcs = ['a.cc'] if isinstance('x', 'notatype') else [])`,
+	})
+	if err := New(root).LoadBuildFile(filepath.Join(root, "p/BUILD")); err == nil {
+		t.Fatal("expected an error: isinstance type arg must be a type builtin")
+	}
+}

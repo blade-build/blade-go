@@ -195,9 +195,10 @@ func (l *Loader) loadExtension(_ *starlark.Thread, module string) (starlark.Stri
 		return nil, fmt.Errorf("load(%q): %w", module, err)
 	}
 	pre := starlark.StringDict{
-		"blade":     bladectx.BuildModule("", l.BuildDir, l.Config),
-		"native":    l.nativeModule(),
-		"enable_if": enableIfBuiltin(),
+		"blade":      bladectx.BuildModule("", l.BuildDir, l.Config),
+		"native":     l.nativeModule(),
+		"enable_if":  enableIfBuiltin(),
+		"isinstance": isinstanceBuiltin(),
 	}
 	et := &starlark.Thread{Name: p, Load: l.loadExtension}
 	globals, err := starlark.ExecFileOptions(fileOptions(), et, p, src, pre)
@@ -225,6 +226,7 @@ func (l *Loader) addConfigBuiltins(pre starlark.StringDict) {
 func (l *Loader) addHelperBuiltins(pre starlark.StringDict) {
 	pre["enable_if"] = enableIfBuiltin()
 	pre["glob"] = globBuiltin()
+	pre["isinstance"] = isinstanceBuiltin()
 }
 
 func (l *Loader) ruleBuiltin(ruleType string) *starlark.Builtin {
@@ -271,6 +273,31 @@ func (l *Loader) configBuiltin(name string) *starlark.Builtin {
 		}
 		l.Config.Record(name, attrs, callerPos(thread))
 		return starlark.None, nil
+	})
+}
+
+// isinstanceBuiltin provides Python's isinstance(obj, type) for BUILD/.bld code
+// (Starlark has no isinstance). The type argument is a universe type constructor
+// (str/list/dict/int/bool/tuple/float), matching how BUILD authors write it.
+func isinstanceBuiltin() *starlark.Builtin {
+	typeName := map[string]string{
+		"str": "string", "list": "list", "dict": "dict",
+		"int": "int", "bool": "bool", "tuple": "tuple", "float": "float",
+	}
+	return starlark.NewBuiltin("isinstance", func(_ *starlark.Thread, b *starlark.Builtin, args starlark.Tuple, kwargs []starlark.Tuple) (starlark.Value, error) {
+		var obj, typ starlark.Value
+		if err := starlark.UnpackArgs(b.Name(), args, kwargs, "obj", &obj, "type", &typ); err != nil {
+			return nil, err
+		}
+		tb, ok := typ.(*starlark.Builtin)
+		if !ok {
+			return nil, fmt.Errorf("isinstance: type must be one of str/list/dict/int/bool/tuple/float")
+		}
+		want, ok := typeName[tb.Name()]
+		if !ok {
+			return nil, fmt.Errorf("isinstance: unsupported type %q", tb.Name())
+		}
+		return starlark.Bool(obj.Type() == want), nil
 	})
 }
 

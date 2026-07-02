@@ -50,7 +50,8 @@ known.
 | 7 | `cc_test` execution + `blade test` CLI | ✅ |
 | 8a | vcpkg resolver (`vcpkg#port:lib` → include/lib flags) | ✅ |
 | 8b | //thirdparty→vcpkg mapping (flare graph resolves) | ✅ |
-| 8c | full flare compile + differential harness vs Python Blade | ⬜ |
+| 8c | flare `.bld` loads (isinstance builtin + flare assert/`is`/str-concat fixes) | ✅ |
+| 8d | full flare compile + differential harness vs Python Blade | ⬜ |
 
 Each phase is one PR, merged after CI is green.
 
