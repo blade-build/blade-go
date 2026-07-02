@@ -7,12 +7,35 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"strings"
 
 	"github.com/blade-build/blade-go/internal/cc"
+	"github.com/blade-build/blade-go/internal/config"
 	"github.com/blade-build/blade-go/internal/graph"
 	"github.com/blade-build/blade-go/internal/loader"
 	"github.com/blade-build/blade-go/internal/toolchain"
 )
+
+// configureProto applies proto_library_config (protoc path, protobuf_libs) to
+// the generator. Non-string / lambda values are ignored, keeping the defaults.
+func configureProto(gen *cc.Generator, cfg *config.Config) {
+	for _, s := range cfg.Named("proto_library_config") {
+		if p, ok := s.Attrs["protoc"].(string); ok && p != "" {
+			gen.Protoc = p
+		}
+		if libs, ok := s.Attrs["protobuf_libs"].([]any); ok {
+			var names []string
+			for _, l := range libs {
+				if str, ok := l.(string); ok {
+					names = append(names, strings.TrimPrefix(str, "#"))
+				}
+			}
+			if len(names) > 0 {
+				gen.ProtobufLibs = names
+			}
+		}
+	}
+}
 
 // FindRoot walks up from start to the nearest directory containing BLADE_ROOT.
 func FindRoot(start string) (string, error) {
@@ -52,6 +75,7 @@ func Build(root string, targets []string, opt Options) (string, error) {
 		return "", err
 	}
 	gen := cc.New(toolchain.Detect())
+	configureProto(gen, l.Config)
 	f, err := gen.Generate(g)
 	if err != nil {
 		return "", err

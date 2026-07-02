@@ -13,13 +13,20 @@ import (
 
 // Generator turns a resolved graph into a ninja file.
 type Generator struct {
-	Tc       *toolchain.Toolchain
-	BuildDir string // build output dir (e.g. "build64_release")
+	Tc           *toolchain.Toolchain
+	BuildDir     string   // build output dir (e.g. "build64_release")
+	Protoc       string   // protoc executable (proto_library codegen)
+	ProtobufLibs []string // system libs a proto_library pulls in (bare names)
 }
 
-// New returns a Generator with the default build dir.
+// New returns a Generator with the default build dir and protobuf settings.
 func New(tc *toolchain.Toolchain) *Generator {
-	return &Generator{Tc: tc, BuildDir: "build64_release"}
+	return &Generator{
+		Tc:           tc,
+		BuildDir:     "build64_release",
+		Protoc:       "protoc",
+		ProtobufLibs: []string{"protobuf", "pthread"},
+	}
 }
 
 // IsCC reports whether a rule type is one this generator handles.
@@ -31,7 +38,7 @@ func IsCC(ruleType string) bool {
 	return false
 }
 
-// Generate produces the ninja file for all cc targets in g.
+// Generate produces the ninja file for all cc / proto targets in g.
 func (gen *Generator) Generate(g *graph.Graph) (*ninja.File, error) {
 	sorted, err := g.TopoSort()
 	if err != nil {
@@ -41,27 +48,37 @@ func (gen *Generator) Generate(g *graph.Graph) (*ninja.File, error) {
 	f.SetVar("cc", gen.Tc.CC)
 	f.SetVar("cxx", gen.Tc.CXX)
 	f.SetVar("ar", gen.Tc.AR)
+	f.SetVar("protoc", gen.Protoc)
+	f.SetVar("builddir", gen.BuildDir)
 	gen.emitRules(f)
 
 	libOf := map[*graph.Node]string{}
+	genHdrsOf := map[*graph.Node][]string{}
 	for _, n := range sorted {
-		if !IsCC(n.Target.Type) {
-			continue
-		}
-		objs := gen.emitCompiles(f, n)
-		switch n.Target.Type {
-		case "cc_library":
-			lib := gen.libPath(n)
-			f.AddBuild(ninja.Build{Outputs: []string{lib}, Rule: "ar", Inputs: objs})
+		switch {
+		case n.Target.Type == "proto_library":
+			lib, hdrs := gen.emitProto(f, n)
 			libOf[n] = lib
-		default: // cc_binary / cc_test / cc_benchmark
+			genHdrsOf[n] = hdrs
+		case IsCC(n.Target.Type):
+			objs := gen.emitCompiles(f, n, gen.transitiveGenHdrs(n, genHdrsOf))
+			if n.Target.Type == "cc_library" {
+				lib := gen.libPath(n)
+				f.AddBuild(ninja.Build{Outputs: []string{lib}, Rule: "ar", Inputs: objs})
+				libOf[n] = lib
+				continue
+			}
 			libs, implicit := gen.transitiveLibs(n, libOf)
+			syslibs := gen.transitiveSyslibs(n)
+			if gen.hasProtoInClosure(n) {
+				syslibs = uniqueStrings(append(syslibs, gen.ProtobufLibs...))
+			}
 			f.AddBuild(ninja.Build{
 				Outputs:  []string{gen.binPath(n)},
 				Rule:     "link",
 				Inputs:   objs,
 				Implicit: implicit,
-				Vars:     map[string]string{"libs": gen.linkArgs(libs, gen.transitiveSyslibs(n))},
+				Vars:     map[string]string{"libs": gen.linkArgs(libs, syslibs)},
 			})
 		}
 	}
@@ -85,10 +102,41 @@ func (gen *Generator) emitRules(f *ninja.File) {
 		Name: "link", Description: "LINK ${out}",
 		Command: "${cxx} ${in} ${libs} ${ldflags} -o ${out}",
 	})
+	f.AddRule(ninja.Rule{
+		Name: "protoc", Description: "PROTOC ${in}",
+		Command: "${protoc} --proto_path=. --cpp_out=${builddir} ${in}",
+	})
+}
+
+// emitProto runs protoc for each .proto (generating .pb.cc/.pb.h under the build
+// dir), compiles the generated C++, and archives it into the target's library.
+// Returns the archive path and the generated header paths (for consumers).
+func (gen *Generator) emitProto(f *ninja.File, n *graph.Node) (lib string, genHdrs []string) {
+	inc := gen.includes(n)
+	var objs []string
+	for _, src := range n.Target.AttrStrings("srcs") {
+		proto := path.Join(n.Target.Package, src)
+		stem := path.Join(gen.BuildDir, strings.TrimSuffix(proto, ".proto"))
+		pbcc, pbh := stem+".pb.cc", stem+".pb.h"
+		f.AddBuild(ninja.Build{Outputs: []string{pbcc, pbh}, Rule: "protoc", Inputs: []string{proto}})
+		obj := pbcc + gen.Tc.ObjSuffix()
+		f.AddBuild(ninja.Build{
+			Outputs: []string{obj}, Rule: "cxx", Inputs: []string{pbcc},
+			Implicit: []string{pbh},
+			Vars:     map[string]string{"includes": inc},
+		})
+		objs = append(objs, obj)
+		genHdrs = append(genHdrs, pbh)
+	}
+	lib = gen.libPath(n)
+	f.AddBuild(ninja.Build{Outputs: []string{lib}, Rule: "ar", Inputs: objs})
+	return lib, genHdrs
 }
 
 // emitCompiles emits one compile edge per source and returns the object paths.
-func (gen *Generator) emitCompiles(f *ninja.File, n *graph.Node) []string {
+// implicitHdrs (generated proto headers in the closure) are added as implicit
+// deps so codegen is ordered before compilation.
+func (gen *Generator) emitCompiles(f *ninja.File, n *graph.Node, implicitHdrs []string) []string {
 	inc := gen.includes(n)
 	var objs []string
 	for _, src := range n.Target.AttrStrings("srcs") {
@@ -100,11 +148,62 @@ func (gen *Generator) emitCompiles(f *ninja.File, n *graph.Node) []string {
 		}
 		f.AddBuild(ninja.Build{
 			Outputs: []string{obj}, Rule: rule, Inputs: []string{srcPath},
-			Vars: map[string]string{"includes": inc},
+			Implicit: implicitHdrs,
+			Vars:     map[string]string{"includes": inc},
 		})
 		objs = append(objs, obj)
 	}
 	return objs
+}
+
+// transitiveGenHdrs collects the generated headers of all proto_library deps.
+func (gen *Generator) transitiveGenHdrs(n *graph.Node, genHdrsOf map[*graph.Node][]string) []string {
+	var out []string
+	seen := map[*graph.Node]bool{}
+	var walk func(*graph.Node)
+	walk = func(node *graph.Node) {
+		for _, dep := range node.Deps {
+			if seen[dep] {
+				continue
+			}
+			seen[dep] = true
+			out = append(out, genHdrsOf[dep]...)
+			walk(dep)
+		}
+	}
+	walk(n)
+	return out
+}
+
+// hasProtoInClosure reports whether any transitive dep is a proto_library.
+func (gen *Generator) hasProtoInClosure(n *graph.Node) bool {
+	seen := map[*graph.Node]bool{}
+	var walk func(*graph.Node) bool
+	walk = func(node *graph.Node) bool {
+		for _, dep := range node.Deps {
+			if seen[dep] {
+				continue
+			}
+			seen[dep] = true
+			if dep.Target.Type == "proto_library" || walk(dep) {
+				return true
+			}
+		}
+		return false
+	}
+	return walk(n)
+}
+
+func uniqueStrings(ss []string) []string {
+	seen := map[string]bool{}
+	var out []string
+	for _, s := range ss {
+		if !seen[s] {
+			seen[s] = true
+			out = append(out, s)
+		}
+	}
+	return out
 }
 
 // includes builds the -I flags: workspace root and build dir (so both source and
