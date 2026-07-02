@@ -76,6 +76,10 @@ func (gen *Generator) Generate(g *graph.Graph) (*ninja.File, error) {
 		case IsCC(n.Target.Type):
 			objs := gen.emitCompiles(f, n, gen.transitiveGenHdrs(n, genHdrsOf), gen.transitiveGenFiles(n, genFilesOf))
 			if n.Target.Type == "cc_library" {
+				if len(objs) == 0 {
+					// Header-only library: no sources, so no archive to link.
+					continue
+				}
 				lib := gen.libPath(n)
 				f.AddBuild(ninja.Build{Outputs: []string{lib}, Rule: "ar", Inputs: objs})
 				libOf[n] = lib
