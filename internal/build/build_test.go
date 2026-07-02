@@ -385,7 +385,7 @@ cc_test(name = 'fail', srcs = ['fail.cc'])
 			t.Fatal(err)
 		}
 	}
-	results, err := Test(root, []string{"//t:pass", "//t:fail"})
+	results, err := Test(root, []string{"//t:pass", "//t:fail"}, Options{})
 	if err != nil {
 		t.Fatal(err)
 	}

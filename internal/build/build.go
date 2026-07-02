@@ -227,7 +227,8 @@ func FindRoot(start string) (string, error) {
 
 // Options controls a build.
 type Options struct {
-	RunNinja bool
+	RunNinja  bool     // run ninja after generating build.ninja
+	NinjaArgs []string // extra ninja flags (e.g. -j N, -k 0, -n) from the CLI
 }
 
 // timing reports per-phase front-end durations to stderr when BLADE_TIMING is
@@ -339,7 +340,7 @@ func Build(root string, targets []string, opt Options) (string, error) {
 		return "", err
 	}
 	if opt.RunNinja {
-		if err := runNinja(root, buildFile); err != nil {
+		if err := runNinja(root, buildFile, opt.NinjaArgs...); err != nil {
 			return buildFile, err
 		}
 	}
@@ -355,7 +356,7 @@ type TestResult struct {
 
 // Test builds the given targets and runs each that is a cc_test, returning one
 // result per test target (in request order).
-func Test(root string, targets []string) ([]TestResult, error) {
+func Test(root string, targets []string, opt Options) ([]TestResult, error) {
 	g, gen, f, expanded, err := plan(root, targets)
 	if err != nil {
 		return nil, err
@@ -367,7 +368,7 @@ func Test(root string, targets []string) ([]TestResult, error) {
 	// Keep going past a failed build so every runnable test still gets built and
 	// run -- one target that won't compile shouldn't hide the rest of a sweep.
 	// (Errors are surfaced; a test whose binary is missing is reported failed.)
-	runNinja(root, buildFile, "-k", "0")
+	runNinja(root, buildFile, append([]string{"-k", "0"}, opt.NinjaArgs...)...)
 	var results []TestResult
 	for _, r := range expanded {
 		lbl, err := label.Parse(r, "")

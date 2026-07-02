@@ -117,6 +117,30 @@ BLADE_ROOT, resolves the graph, generates `build64_release/build.ninja`, and run
 ninja to produce the binary/archive. `blade test //pkg/...` builds and runs every
 cc_test in the pattern.
 
+### Command line
+
+The CLI mirrors Python Blade (argparse) so a Blade command line runs unchanged —
+same `blade build|test [flags] targets...` shape, GNU long/short flags:
+
+```sh
+blade build -j8 -k -p release //flare/rpc:rpc      # honored: -j / -k / -p
+blade build --no-build //flare/...                 # front-end only (no ninja)
+blade test -k //flare/base/...                      # run every cc_test in the tree
+```
+
+| flag | effect |
+| --- | --- |
+| `-j, --jobs N` | ninja `-j N` |
+| `-k, --keep-going` | ninja `-k 0` |
+| `-n, --dry-run` | ninja `-n` |
+| `--no-build`, `--stop-after {load,analyze,generate}` | generate `build.ninja`, don't run ninja |
+| `-p, --profile {release,debug}` | build profile (release implemented) |
+
+Targets accept patterns: `//pkg:name`, `//pkg:*` (a package), `//pkg/...`
+(recursive), `//...` (all). Blade flags blade-go doesn't implement yet
+(`--coverage`, `--sanitizer`, `--generate-*`, …) are accepted and ignored, so an
+existing Blade invocation still runs.
+
 ## Performance
 
 Front-end cost (load BUILD files → resolve graph → generate ninja; *not* the
