@@ -376,3 +376,18 @@ func TestHeaderOnlyLibraryNoArchive(t *testing.T) {
 		t.Errorf("consumer link edge missing:\n%s", out)
 	}
 }
+
+func TestIsHeaderCompilesAsCXX(t *testing.T) {
+	// A header listed in srcs (blade's self-sufficiency check) must compile with
+	// the C++ compiler -- it pulls in <memory> and other C++ headers.
+	for _, h := range []string{"a.h", "b.hpp", "c.hh", "d.inc"} {
+		if !isHeader(h) {
+			t.Errorf("isHeader(%q)=false", h)
+		}
+	}
+	for _, c := range []string{"a.c", "a.cc", "a.o"} {
+		if isHeader(c) {
+			t.Errorf("isHeader(%q)=true, want false", c)
+		}
+	}
+}

@@ -51,17 +51,42 @@ type Builder struct {
 	// instead of loading their BUILD (e.g. "thirdparty/" -> vcpkg#<port>:<lib>).
 	// Empty disables the mapping.
 	VcpkgPrefix string
+
+	// legacyPublic holds the "pkg:name" keys that global_config's
+	// legacy_public_targets marks PUBLIC by default (blade's grandfather list for
+	// targets that predate explicit visibility). Populated lazily from config.
+	legacyPublic map[string]bool
 }
 
 // NewBuilder returns a Builder that loads packages through l, mapping
 // //thirdparty/... deps to vcpkg by default.
 func NewBuilder(l *loader.Loader) *Builder {
 	return &Builder{
-		loader:      l,
-		loaded:      map[string]bool{},
-		graph:       &Graph{nodes: map[string]*Node{}},
-		VcpkgPrefix: "thirdparty/",
+		loader:       l,
+		loaded:       map[string]bool{},
+		graph:        &Graph{nodes: map[string]*Node{}},
+		VcpkgPrefix:  "thirdparty/",
+		legacyPublic: legacyPublicSet(l),
 	}
+}
+
+// legacyPublicSet reads global_config's legacy_public_targets into a set of
+// "pkg:name" keys.
+func legacyPublicSet(l *loader.Loader) map[string]bool {
+	set := map[string]bool{}
+	if l == nil || l.Config == nil {
+		return set
+	}
+	if v, ok := l.Config.GetItem("global_config", "legacy_public_targets"); ok {
+		if list, ok := v.([]any); ok {
+			for _, e := range list {
+				if s, ok := e.(string); ok {
+					set[s] = true
+				}
+			}
+		}
+	}
+	return set
 }
 
 // vcpkgFromThirdparty maps a thirdparty label to a vcpkg dep: the port is the
@@ -162,7 +187,9 @@ func (b *Builder) resolve(lbl label.Label) (*Node, error) {
 		if err != nil {
 			return nil, fmt.Errorf("%s: dep %s: %w", lbl, dep, err)
 		}
-		if !label.VisibleTo(dn.Target.AttrStrings("visibility"), dn.Target.Package, lbl) {
+		vis := dn.Target.AttrStrings("visibility")
+		legacyPub := len(vis) == 0 && b.legacyPublic[dn.Target.Package+":"+dn.Target.Name]
+		if !legacyPub && !label.VisibleTo(vis, dn.Target.Package, lbl) {
 			return nil, fmt.Errorf("%s depends on %s, which is not visible to it", lbl, dlbl)
 		}
 		n.Deps = append(n.Deps, dn)

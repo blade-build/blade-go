@@ -202,3 +202,35 @@ func TestFromEnv(t *testing.T) {
 		t.Error("default triplet should be non-empty")
 	}
 }
+
+func TestBuildIncludePrefixes(t *testing.T) {
+	// flare's include_prefix ports (zlib, snappy): vcpkg ships headers flat, but
+	// flare includes "zlib/zlib.h". A per-prefix symlink to the include dir makes
+	// "<prefix>/hdr" resolve via -I<PrefixRoot>.
+	manifest := t.TempDir()
+	installed := t.TempDir()
+	if err := os.MkdirAll(filepath.Join(installed, "include"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(installed, "include", "zlib.h"), nil, 0o644); err != nil {
+		t.Fatal(err)
+	}
+	r := &Resolver{InstalledDir: installed}
+	packages := map[string]any{
+		"zlib": map[string]any{"include_prefix": "zlib"},
+		"fmt":  "7.1.3", // no include_prefix -> no symlink
+	}
+	if err := r.buildIncludePrefixes(packages, manifest); err != nil {
+		t.Fatal(err)
+	}
+	if r.PrefixRoot == "" {
+		t.Fatal("PrefixRoot not set")
+	}
+	// "zlib/zlib.h" resolves under PrefixRoot via the symlink.
+	if _, err := os.Stat(filepath.Join(r.PrefixRoot, "zlib", "zlib.h")); err != nil {
+		t.Errorf("zlib/zlib.h not resolvable via prefix symlink: %v", err)
+	}
+	if _, err := os.Lstat(filepath.Join(r.PrefixRoot, "fmt")); err == nil {
+		t.Error("fmt has no include_prefix; should not get a symlink")
+	}
+}
