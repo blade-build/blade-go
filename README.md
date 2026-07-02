@@ -49,7 +49,8 @@ known.
 | 6 | `gen_rule` ninja backend + generated-source resolution + `build_target` | ✅ |
 | 7 | `cc_test` execution + `blade test` CLI | ✅ |
 | 8a | vcpkg resolver (`vcpkg#port:lib` → include/lib flags) | ✅ |
-| 8b | full flare build + differential harness vs Python Blade | ⬜ |
+| 8b | //thirdparty→vcpkg mapping (flare graph resolves) | ✅ |
+| 8c | full flare compile + differential harness vs Python Blade | ⬜ |
 
 Each phase is one PR, merged after CI is green.
 

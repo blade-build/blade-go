@@ -6,6 +6,7 @@ package graph
 import (
 	"fmt"
 	"path/filepath"
+	"strings"
 
 	"github.com/blade-build/blade-go/internal/label"
 	"github.com/blade-build/blade-go/internal/loader"
@@ -44,15 +45,37 @@ type Builder struct {
 	loader *loader.Loader
 	loaded map[string]bool
 	graph  *Graph
+
+	// VcpkgPrefix routes deps whose package starts with this prefix to vcpkg
+	// instead of loading their BUILD (e.g. "thirdparty/" -> vcpkg#<port>:<lib>).
+	// Empty disables the mapping.
+	VcpkgPrefix string
 }
 
-// NewBuilder returns a Builder that loads packages through l.
+// NewBuilder returns a Builder that loads packages through l, mapping
+// //thirdparty/... deps to vcpkg by default.
 func NewBuilder(l *loader.Loader) *Builder {
 	return &Builder{
-		loader: l,
-		loaded: map[string]bool{},
-		graph:  &Graph{nodes: map[string]*Node{}},
+		loader:      l,
+		loaded:      map[string]bool{},
+		graph:       &Graph{nodes: map[string]*Node{}},
+		VcpkgPrefix: "thirdparty/",
 	}
+}
+
+// vcpkgFromThirdparty maps a thirdparty label to a vcpkg dep: the port is the
+// first path component after the prefix, the lib is the target name. Returns
+// false when the label is not under the prefix.
+func (b *Builder) vcpkgFromThirdparty(lbl label.Label) (label.VcpkgDep, bool) {
+	if b.VcpkgPrefix == "" || !strings.HasPrefix(lbl.Package, b.VcpkgPrefix) {
+		return label.VcpkgDep{}, false
+	}
+	rest := strings.TrimPrefix(lbl.Package, b.VcpkgPrefix)
+	port := rest
+	if i := strings.IndexByte(rest, '/'); i >= 0 {
+		port = rest[:i]
+	}
+	return label.VcpkgDep{Port: port, Lib: lbl.Name}, true
 }
 
 // Build resolves the transitive closure of the given root labels and returns the
@@ -110,6 +133,10 @@ func (b *Builder) resolve(lbl label.Label) (*Node, error) {
 		}
 		if dlbl.IsSyslib() {
 			n.Syslibs = append(n.Syslibs, dlbl)
+			continue
+		}
+		if v, ok := b.vcpkgFromThirdparty(dlbl); ok {
+			n.Vcpkgs = append(n.Vcpkgs, v)
 			continue
 		}
 		dn, err := b.resolve(dlbl)
