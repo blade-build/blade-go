@@ -24,6 +24,9 @@ type Resolver struct {
 	Triplet      string // e.g. "x64-linux"
 	InstalledDir string // overrides Root/installed/Triplet (manifest-mode install)
 	PrefixRoot   string // include-prefix shim root (for flare's include_prefix ports)
+
+	linkExtras    []string // cached pkg-config -framework flags
+	linkExtrasSet bool
 }
 
 // FromEnv builds a Resolver from $VCPKG_ROOT and $VCPKG_DEFAULT_TRIPLET (falling
@@ -103,6 +106,10 @@ func (r *Resolver) ToolPath(port, tool string) string {
 // these the same way (blade-build #1337). Frameworks are de-duplicated; adding an
 // unused one is harmless.
 func (r *Resolver) LinkExtras() []string {
+	if r.linkExtrasSet {
+		return r.linkExtras // constant for a tree; scanned once, not per link
+	}
+	r.linkExtrasSet = true
 	if !r.Configured() {
 		return nil
 	}
@@ -132,6 +139,7 @@ func (r *Resolver) LinkExtras() []string {
 			}
 		}
 	}
+	r.linkExtras = out
 	return out
 }
 
