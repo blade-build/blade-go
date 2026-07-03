@@ -10,8 +10,10 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"runtime"
 	"sort"
 	"strings"
+	"sync"
 	"time"
 
 	"go.starlark.net/starlark"
@@ -234,6 +236,7 @@ type Options struct {
 	RunNinja  bool     // run ninja after generating build.ninja
 	NinjaArgs []string // extra ninja flags (e.g. -j N, -k 0, -n) from the CLI
 	FullTest  bool     // re-run every test, ignoring the incremental cache
+	TestJobs  int      // parallel test workers (0 = number of CPUs)
 }
 
 // timing reports per-phase front-end durations to stderr when BLADE_TIMING is
@@ -393,7 +396,11 @@ func Test(root string, targets []string, opt Options, onResult func(TestResult))
 	// (Errors are surfaced; a test whose binary is missing is reported failed.)
 	runNinja(root, buildFile, append([]string{"-k", "0"}, opt.NinjaArgs...)...)
 	hist := loadTestHistory(root)
-	var results []TestResult
+
+	// Split into the normal tests (run concurrently) and the exclusive ones
+	// (`exclusive = True`: CPU-heavy / timing-sensitive -- run serially and never
+	// alongside others, or they go flaky). Non-cc_test targets are ignored.
+	var normal, exclusive []*graph.Node
 	for _, r := range expanded {
 		lbl, err := label.Parse(r, "")
 		if err != nil {
@@ -403,34 +410,74 @@ func Test(root string, targets []string, opt Options, onResult func(TestResult))
 		if node == nil || node.Target.Type != "cc_test" {
 			continue
 		}
-		binRel := gen.BinPath(node)
-		fp := testFingerprint(root, binRel, node)
+		if node.Target.AttrBool("exclusive") {
+			exclusive = append(exclusive, node)
+		} else {
+			normal = append(normal, node)
+		}
+	}
 
-		// Incremental skip: passed last time, inputs unchanged.
-		if !opt.FullTest {
-			if rec, ok := hist[node.Label()]; ok && rec.Passed && rec.Fingerprint == fp {
-				res := TestResult{Label: node.Label(), Passed: true, Cached: true}
-				if onResult != nil {
-					onResult(res)
-				}
-				results = append(results, res)
-				continue
+	var mu sync.Mutex // guards results, hist, and onResult ordering
+	var results []TestResult
+	runOne := func(node *graph.Node) {
+		binRel := gen.BinPath(node)
+		fp := testFingerprint(root, binRel, node) // stat-only, safe concurrently
+
+		mu.Lock()
+		rec, ok := hist[node.Label()]
+		cached := !opt.FullTest && ok && rec.Passed && rec.Fingerprint == fp
+		mu.Unlock()
+		if cached {
+			res := TestResult{Label: node.Label(), Passed: true, Cached: true}
+			mu.Lock()
+			if onResult != nil {
+				onResult(res)
 			}
+			results = append(results, res)
+			mu.Unlock()
+			return
 		}
 
+		// Stage under the lock: two tests in one package write the same dir.
+		mu.Lock()
 		runtimeDir := stageTestdata(root, node, binRel)
+		mu.Unlock()
 		cmd := exec.Command(filepath.Join(root, binRel))
 		if runtimeDir != "" {
 			cmd.Dir = runtimeDir // the test reads its testdata relative to here
 		}
-		out, runErr := cmd.CombinedOutput()
+		out, runErr := cmd.CombinedOutput() // the slow part -- runs unlocked
 		res := TestResult{Label: node.Label(), Passed: runErr == nil, Output: string(out)}
+		mu.Lock()
 		hist[node.Label()] = testRecord{Passed: res.Passed, Fingerprint: fp}
 		if onResult != nil {
 			onResult(res)
 		}
 		results = append(results, res)
+		mu.Unlock()
 	}
+
+	jobs := opt.TestJobs
+	if jobs <= 0 {
+		jobs = runtime.NumCPU()
+	}
+	sem := make(chan struct{}, jobs)
+	var wg sync.WaitGroup
+	for _, node := range normal {
+		wg.Add(1)
+		sem <- struct{}{}
+		go func(n *graph.Node) {
+			defer wg.Done()
+			defer func() { <-sem }()
+			runOne(n)
+		}(node)
+	}
+	wg.Wait()
+	// Exclusive tests run one at a time, after the concurrent batch drained.
+	for _, node := range exclusive {
+		runOne(node)
+	}
+
 	saveTestHistory(root, hist)
 	return results, nil
 }
