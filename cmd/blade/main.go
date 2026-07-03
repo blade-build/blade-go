@@ -66,6 +66,7 @@ type buildFlags struct {
 	stopAfter string
 	profile   string
 	hdrCheck  string // header inclusion check: off|warn|error
+	debugInfo string // debug-info level: no|low|mid|high ("" = project default)
 }
 
 // register adds the flags to fs and tolerates unknown Blade flags.
@@ -78,6 +79,7 @@ func (bf *buildFlags) register(c *cobra.Command) {
 	f.StringVar(&bf.stopAfter, "stop-after", "", "stop after a phase: load|analyze|generate|build")
 	f.StringVarP(&bf.profile, "profile", "p", "release", "build profile: release|debug")
 	f.StringVar(&bf.hdrCheck, "hdr-check", "", "header inclusion-dependency check: off|warn|error (default: project cc_config)")
+	f.StringVar(&bf.debugInfo, "debug-info-level", "", "debug info level: no|low|mid|high (default: project global_config)")
 
 	// Blade's boolean (store_true) flags that blade-go doesn't act on: declare
 	// them (hidden) so they parse as booleans and don't swallow a following
@@ -131,13 +133,18 @@ func (bf *buildFlags) ninja() (run bool, args []string) {
 	return run, args
 }
 
-// checkProfile validates -p/--profile (blade-go implements release and debug).
+// checkProfile validates -p/--profile and --debug-info-level.
 func (bf *buildFlags) checkProfile() error {
 	switch bf.profile {
 	case "", "release", "debug":
+	default:
+		return fmt.Errorf("invalid --profile %q (want release or debug)", bf.profile)
+	}
+	switch bf.debugInfo {
+	case "", "no", "low", "mid", "high":
 		return nil
 	}
-	return fmt.Errorf("invalid --profile %q (want release or debug)", bf.profile)
+	return fmt.Errorf("invalid --debug-info-level %q (want no|low|mid|high)", bf.debugInfo)
 }
 
 func newBuildCmd() *cobra.Command {
@@ -155,7 +162,7 @@ func newBuildCmd() *cobra.Command {
 				return err
 			}
 			run, nargs := bf.ninja()
-			ninjaFile, err := build.Build(root, targets, build.Options{RunNinja: run, NinjaArgs: nargs, Profile: bf.profile})
+			ninjaFile, err := build.Build(root, targets, build.Options{RunNinja: run, NinjaArgs: nargs, Profile: bf.profile, DebugInfo: bf.debugInfo})
 			if err != nil {
 				return err
 			}
@@ -237,7 +244,7 @@ func newTestCmd() *cobra.Command {
 					fmt.Print(r.Output)
 				}
 			}
-			results, err := build.Test(root, targets, build.Options{NinjaArgs: nargs, FullTest: fullTest, TestJobs: testJobs, Profile: bf.profile}, print)
+			results, err := build.Test(root, targets, build.Options{NinjaArgs: nargs, FullTest: fullTest, TestJobs: testJobs, Profile: bf.profile, DebugInfo: bf.debugInfo}, print)
 			if err != nil {
 				return err
 			}
@@ -295,7 +302,7 @@ func newRunCmd() *cobra.Command {
 				return err
 			}
 			_, nargs := bf.ninja()
-			code, err := build.Run(root, target, progArgs, build.Options{NinjaArgs: nargs, Profile: bf.profile})
+			code, err := build.Run(root, target, progArgs, build.Options{NinjaArgs: nargs, Profile: bf.profile, DebugInfo: bf.debugInfo})
 			if err != nil {
 				return err
 			}

@@ -18,6 +18,7 @@ type Generator struct {
 	Tc               *toolchain.Toolchain
 	BuildDir         string           // build output dir (e.g. "build_release")
 	Profile          string           // "release" or "debug" (drives optimize/NDEBUG flags)
+	DebugInfo        string           // "" (project default) or no|low|mid|high (-g level override)
 	Self             string           // path to the blade-go binary (resource_library codegen)
 	Protoc           string           // protoc executable (proto_library codegen)
 	ProtobufLibs     []string         // system libs a proto_library pulls in (bare names)
@@ -60,6 +61,24 @@ func (gen *Generator) profileFlags() []string {
 	return []string{"-O2", "-DNDEBUG"} // release (default)
 }
 
+// debugInfoFlags maps --debug-info-level / global_config.debug_info_level to a
+// -g level, appended after the project's own debug flags so it overrides them.
+// Empty (unset) adds nothing -- debug info stays whatever the project's cc_config
+// specifies (flare uses -gdwarf-2).
+func (gen *Generator) debugInfoFlags() []string {
+	switch gen.DebugInfo {
+	case "no":
+		return []string{"-g0"}
+	case "low":
+		return []string{"-g1"}
+	case "mid":
+		return []string{"-g2"}
+	case "high":
+		return []string{"-g3"}
+	}
+	return nil
+}
+
 // IsCC reports whether a rule type is one this generator handles.
 func IsCC(ruleType string) bool {
 	switch ruleType {
@@ -90,6 +109,7 @@ func (gen *Generator) Generate(g *graph.Graph) (*ninja.File, error) {
 	// debug does neither (asserts stay live, unoptimized) and enables the stack
 	// protector. Debug info (-gdwarf-2) comes from the project's cc_config in both.
 	cpp := append(append([]string{}, gen.Cppflags...), gen.profileFlags()...)
+	cpp = append(cpp, gen.debugInfoFlags()...)
 	f.SetVar("cppflags", strings.Join(cpp, " "))
 	f.SetVar("cxxflags", strings.Join(gen.Cxxflags, " "))
 	f.SetVar("cflags", strings.Join(gen.Cflags, " "))
