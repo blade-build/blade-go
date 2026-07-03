@@ -9,6 +9,7 @@ import (
 	"io/fs"
 	"os"
 	"os/exec"
+	"path"
 	"path/filepath"
 	"runtime"
 	"sort"
@@ -399,6 +400,47 @@ func writeNinja(root string, gen *cc.Generator, f *ninja.File) (string, error) {
 	return buildFile, nil
 }
 
+// precreateBuildDirs materializes every build-dir include directory before ninja
+// runs. Blade does this implicitly: each target's per-target ninja file creation
+// os.makedirs(build_dir/<package>) (build_manager.py), so a globally-configured
+// -Ibuild_dir/<pkg> (flare's cc_config.extra_incs lists build_dir/thirdparty) has
+// its directory on disk before the first compile. blade-go writes one build.ninja
+// and would otherwise rely on ninja's lazy per-edge mkdir -- which races the -I:
+// gcc's -Wmissing-include-dirs (under flare's -Werror) errors on a not-yet-created
+// -I dir, and the first compile can precede the edge that would create it. (clang
+// silently ignores missing -I dirs, so this only bites on gcc/Linux.) We create:
+//   - build_dir/<package> for every target (matches Blade's per-target makedirs),
+//   - any build-dir-rooted -I from the global cc_config flags (e.g. the
+//     build_dir/thirdparty mirror), so it exists even with no target under it.
+func precreateBuildDirs(root string, gen *cc.Generator, g *graph.Graph) error {
+	seen := map[string]bool{}
+	mk := func(rel string) error {
+		if rel == "" || seen[rel] {
+			return nil
+		}
+		seen[rel] = true
+		return os.MkdirAll(filepath.Join(root, filepath.FromSlash(rel)), 0o755)
+	}
+	for _, n := range g.All() {
+		if err := mk(path.Join(gen.BuildDir, n.Target.Package)); err != nil {
+			return err
+		}
+	}
+	for _, fl := range gen.Cppflags {
+		d, ok := strings.CutPrefix(fl, "-I")
+		if !ok {
+			continue
+		}
+		d = path.Clean(d)
+		if d == gen.BuildDir || strings.HasPrefix(d, gen.BuildDir+"/") {
+			if err := mk(d); err != nil {
+				return err
+			}
+		}
+	}
+	return nil
+}
+
 func runNinja(root, buildFile string, extraArgs ...string) error {
 	rel, _ := filepath.Rel(root, buildFile)
 	cmd := exec.Command("ninja", append([]string{"-f", rel}, extraArgs...)...)
@@ -414,12 +456,15 @@ func runNinja(root, buildFile string, extraArgs ...string) error {
 // Build loads the workspace, generates the ninja file for the given targets, and
 // (optionally) runs ninja. It returns the path of the generated ninja file.
 func Build(root string, targets []string, opt Options) (string, error) {
-	_, gen, f, _, _, err := plan(root, targets, opt.Profile, opt.DebugInfo, opt.Sanitizers, opt.Coverage)
+	g, gen, f, _, _, err := plan(root, targets, opt.Profile, opt.DebugInfo, opt.Sanitizers, opt.Coverage)
 	if err != nil {
 		return "", err
 	}
 	buildFile, err := writeNinja(root, gen, f)
 	if err != nil {
+		return "", err
+	}
+	if err := precreateBuildDirs(root, gen, g); err != nil {
 		return "", err
 	}
 	if opt.RunNinja {

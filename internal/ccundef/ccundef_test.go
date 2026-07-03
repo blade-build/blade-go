@@ -42,3 +42,13 @@ func TestSeverityFromBlade(t *testing.T) {
 		}
 	}
 }
+
+func TestStackProtectorBaseline(t *testing.T) {
+	// __stack_chk_guard/_fail are loader/runtime-provided; the residual baseline
+	// must cover them so -fstack-protector targets don't flag on Linux.
+	undef := set("__stack_chk_guard", "__stack_chk_fail", "realmissing")
+	got := Unresolved(undef, nil, nil, nil, CompileAllow(nil))
+	if len(got) != 1 || got[0] != "realmissing" {
+		t.Fatalf("stack-protector baseline: got %v, want [realmissing]", got)
+	}
+}

@@ -82,7 +82,15 @@ the last flare BUILD files: the `gen_rule` ninja backend, `build_target`, and
    impl is a free, exhaustive oracle.
 3. **Conformance** — run the existing [blade-test](https://github.com/blade-build/blade-test)
    suites end to end through blade-go.
-4. **The flare build itself** as the top integration test.
+4. **The flare build itself** as the top integration test — verified on both
+   **macOS/clang** and **Linux/gcc** (aarch64, in an Ubuntu container): the whole
+   `//flare/...` repo compiles, links (every binary + test), and passes the
+   undefined-symbol check with zero findings. The Linux pass shook out five
+   portability gaps clang had masked — a missing-`-I`-dir race (gcc errors under
+   `-Wmissing-include-dirs -Werror` where clang stays silent), ELF static-link
+   ordering (vcpkg archives must share the target's `--start-group`), per-target
+   `extra_cppflags`, `//`-rooted include normalization, and multi-archive
+   `foreign_cc_library` selection (lib&lt;name&gt;.a).
 
 CI runs `go test -race -coverprofile` on every PR and reports coverage.
 

@@ -67,6 +67,10 @@ var residualBaseline = compileAll(
 	`_*__sanitizer_\w*`,
 	`_*Annotate\w*`,
 	`_*RunningOnValgrind`,
+	// -fstack-protector's guard/handler: __stack_chk_guard is a data symbol the
+	// dynamic loader provides at runtime (it shows as U in libc.so.6 and the
+	// non-shared helper alike), so no scannable library defines it.
+	`_?__stack_chk_\w+`,
 )
 
 func compileAll(pats ...string) []*regexp.Regexp {
@@ -118,6 +122,15 @@ func NmExternals(nm, lib string) (undef, defined map[string]bool) {
 		if strings.HasSuffix(ty, ":") { // "archive[member]:" header
 			continue
 		}
+		// Strip an ELF symbol-version suffix: a shared lib's dynamic table tags
+		// defined symbols as `sym@@GLIBCXX_3.4` (default) or `sym@VER`, but the
+		// undefined reference in a consumer object is the bare `sym`. Without this
+		// the system baseline (libstdc++/libgcc are versioned) never matches the
+		// std C++ symbols a C++ object references, flagging every C++ target. macOS
+		// .tbd stubs are unversioned, so this only bit on Linux/ELF.
+		if i := strings.IndexByte(name, '@'); i >= 0 {
+			name = name[:i]
+		}
 		switch {
 		case ty == "U":
 			undef[name] = true
@@ -125,6 +138,12 @@ func NmExternals(nm, lib string) (undef, defined map[string]bool) {
 			// weak undefined: linker may leave unresolved. ambient.
 		case ty == "u":
 			defined[name] = true // unique global (defined)
+		case ty == "i" || ty == "I":
+			// GNU indirect function (IFUNC): glibc implements memcpy/memmove and
+			// many str*/mem* routines this way; nm marks a defined IFUNC with a
+			// lowercase `i` regardless of binding, which the uppercase=defined rule
+			// below would otherwise miss, flagging every memcpy caller.
+			defined[name] = true
 		case ty == strings.ToUpper(ty) && ty != strings.ToLower(ty):
 			defined[name] = true // any uppercase letter: defined external
 		}
@@ -230,28 +249,86 @@ func SystemSymbols(cc, goos, nm string) map[string]bool {
 	if cc == "" {
 		cc = "cc"
 	}
+	scan := func(p string) {
+		_, def := NmExternals(nm, p)
+		for s := range def {
+			syms[s] = true
+		}
+	}
+	resolve := func(cand string) string {
+		out, err := exec.Command(cc, "-print-file-name="+cand).Output()
+		if err != nil {
+			return ""
+		}
+		p := strings.TrimSpace(string(out))
+		if p == "" || p == cand { // driver echoes input when unknown
+			return ""
+		}
+		if _, err := os.Stat(p); err != nil {
+			return ""
+		}
+		return p
+	}
 	for _, alias := range []string{"stdc++", "c", "m", "pthread", "dl", "rt", "gcc_s"} {
-		for _, cand := range []string{"lib" + alias + ".so.6", "lib" + alias + ".so.1", "lib" + alias + ".so"} {
-			out, err := exec.Command(cc, "-print-file-name="+cand).Output()
-			if err != nil {
-				continue
+		// Scan EVERY resolvable spelling, not just the first: the versioned
+		// `.so.6`/`.so.1` is the real ELF (libgcc_s.so.1 defines _Unwind_Resume;
+		// its unversioned `libgcc_s.so` is a script naming it by a *relative* path
+		// we can't follow), while the unversioned `.so` is often a linker script
+		// whose *absolute* members add symbols the shared object lacks -- glibc's
+		// `libc.so` = GROUP ( libc.so.6 libc_nonshared.a AS_NEEDED ( ld.so ) ),
+		// where libc_nonshared.a / ld.so hold wrappers and loader globals. Union
+		// is safe: an over-broad system set only reduces findings.
+		for _, cand := range []string{"lib" + alias + ".so", "lib" + alias + ".so.6", "lib" + alias + ".so.1"} {
+			if p := resolve(cand); p != "" {
+				for _, member := range followLinkerScript(p) {
+					scan(member)
+				}
 			}
-			path := strings.TrimSpace(string(out))
-			if path == "" || path == cand { // driver echoes input when unknown
-				continue
+		}
+	}
+	// libgcc.a: the static compiler runtime -- 128-bit arithmetic (__divti3, ...)
+	// and, on aarch64, the outline-atomics helpers (__aarch64_ldadd*/cas*/swp*)
+	// that live here, not in the shared libgcc_s.so.
+	if out, err := exec.Command(cc, "-print-libgcc-file-name").Output(); err == nil {
+		if p := strings.TrimSpace(string(out)); p != "" {
+			if _, err := os.Stat(p); err == nil {
+				scan(p)
 			}
-			if _, err := os.Stat(path); err != nil {
-				continue
-			}
-			_, def := NmExternals(nm, path)
-			for s := range def {
-				syms[s] = true
-			}
-			break
 		}
 	}
 	return syms
 }
+
+// followLinkerScript returns the real library files a GNU-ld linker script
+// references, or [path] when path is a plain ELF object / symlink. `gcc
+// -print-file-name=libc.so` yields such a script on glibc; its GROUP/INPUT names
+// the shared object plus static helpers (and an AS_NEEDED loader) whose symbols
+// belong in the system baseline. A real library starts with the ELF magic; a
+// script is ASCII, so the magic check disambiguates cheaply without reading the
+// (potentially huge) shared object in full.
+func followLinkerScript(path string) []string {
+	f, err := os.Open(path)
+	if err != nil {
+		return []string{path}
+	}
+	defer f.Close()
+	buf := make([]byte, 8192)
+	n, _ := f.Read(buf)
+	buf = buf[:n]
+	if n >= 4 && string(buf[:4]) == "\x7fELF" {
+		return []string{path}
+	}
+	members := ldScriptLibRE.FindAllString(string(buf), -1)
+	if len(members) == 0 {
+		return []string{path}
+	}
+	return members
+}
+
+// ldScriptLibRE matches absolute paths to real libraries (.a or .so[.N...]) in a
+// linker script. The AS_NEEDED loader path (ld-*.so.N) matches too, which is
+// desirable: it defines loader-provided globals a normal link resolves.
+var ldScriptLibRE = regexp.MustCompile(`/\S+\.(?:a|so(?:\.\d+)*)`)
 
 // tbdSymRE matches Mach-O symbol names in an Apple .tbd stub (they carry a
 // leading underscore). Over-matching non-symbol tokens is harmless -- they can't
