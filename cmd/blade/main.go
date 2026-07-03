@@ -12,14 +12,33 @@ import (
 	"os"
 	"runtime/pprof"
 	"strconv"
+	"strings"
 
 	"github.com/spf13/cobra"
 
 	"github.com/blade-build/blade-go/internal/build"
 	"github.com/blade-build/blade-go/internal/hdrcheck"
 	"github.com/blade-build/blade-go/internal/resource"
+	"github.com/blade-build/blade-go/internal/sanitizer"
+	"github.com/blade-build/blade-go/internal/toolchain"
 	"github.com/blade-build/blade-go/internal/version"
 )
+
+// parseSanitizers parses + validates a --sanitizer value against the toolchain.
+func parseSanitizers(value string) ([]string, error) {
+	ss, err := sanitizer.Parse(value)
+	if err != nil {
+		return nil, err
+	}
+	if err := sanitizer.CheckCompat(ss); err != nil {
+		return nil, err
+	}
+	tc := toolchain.Detect()
+	if err := sanitizer.CheckToolchain(ss, strings.Contains(tc.CXX, "clang"), tc.OS); err != nil {
+		return nil, err
+	}
+	return ss, nil
+}
 
 func main() {
 	if p := os.Getenv("BLADE_CPUPROFILE"); p != "" {
@@ -67,6 +86,7 @@ type buildFlags struct {
 	profile   string
 	hdrCheck  string // header inclusion check: off|warn|error
 	debugInfo string // debug-info level: no|low|mid|high ("" = project default)
+	sanitizer string // --sanitizer set (comma-separated: address,thread,undefined,leak,memory)
 }
 
 // register adds the flags to fs and tolerates unknown Blade flags.
@@ -80,6 +100,7 @@ func (bf *buildFlags) register(c *cobra.Command) {
 	f.StringVarP(&bf.profile, "profile", "p", "release", "build profile: release|debug")
 	f.StringVar(&bf.hdrCheck, "hdr-check", "", "header inclusion-dependency check: off|warn|error (default: project cc_config)")
 	f.StringVar(&bf.debugInfo, "debug-info-level", "", "debug info level: no|low|mid|high (default: project global_config)")
+	f.StringVar(&bf.sanitizer, "sanitizer", "", "build/test under sanitizers: address,thread,undefined,leak,memory (comma-separated)")
 
 	// Blade's boolean (store_true) flags that blade-go doesn't act on: declare
 	// them (hidden) so they parse as booleans and don't swallow a following
@@ -161,8 +182,12 @@ func newBuildCmd() *cobra.Command {
 			if err := bf.checkProfile(); err != nil {
 				return err
 			}
+			sans, err := parseSanitizers(bf.sanitizer)
+			if err != nil {
+				return err
+			}
 			run, nargs := bf.ninja()
-			ninjaFile, err := build.Build(root, targets, build.Options{RunNinja: run, NinjaArgs: nargs, Profile: bf.profile, DebugInfo: bf.debugInfo})
+			ninjaFile, err := build.Build(root, targets, build.Options{RunNinja: run, NinjaArgs: nargs, Profile: bf.profile, DebugInfo: bf.debugInfo, Sanitizers: sans})
 			if err != nil {
 				return err
 			}
@@ -174,7 +199,7 @@ func newBuildCmd() *cobra.Command {
 			// The header check reads the `.d` depfiles a build produces, so run
 			// it only when we actually built (not --no-build / --stop-after).
 			if run {
-				return runHdrCheck(root, targets, bf.hdrCheck, bf.profile)
+				return runHdrCheck(root, targets, bf.hdrCheck, bf.profile, sans)
 			}
 			return nil
 		},
@@ -187,8 +212,8 @@ func newBuildCmd() *cobra.Command {
 // reports issues. Each issue carries its own severity (inclusion vs unused can
 // differ per cc_config). Returns an error (failing the command) only when at
 // least one issue is at "error" severity.
-func runHdrCheck(root string, targets []string, override, profile string) error {
-	issues, err := build.CheckHdrs(root, targets, override, profile)
+func runHdrCheck(root string, targets []string, override, profile string, sanitizers []string) error {
+	issues, err := build.CheckHdrs(root, targets, override, profile, sanitizers)
 	if err != nil {
 		return err
 	}
@@ -227,6 +252,10 @@ func newTestCmd() *cobra.Command {
 			if err := bf.checkProfile(); err != nil {
 				return err
 			}
+			sans, err := parseSanitizers(bf.sanitizer)
+			if err != nil {
+				return err
+			}
 			_, nargs := bf.ninja()
 			// Stream each result as it finishes so a large suite shows progress
 			// instead of looking hung until the last (possibly slow) test ends.
@@ -244,7 +273,7 @@ func newTestCmd() *cobra.Command {
 					fmt.Print(r.Output)
 				}
 			}
-			results, err := build.Test(root, targets, build.Options{NinjaArgs: nargs, FullTest: fullTest, TestJobs: testJobs, Profile: bf.profile, DebugInfo: bf.debugInfo}, print)
+			results, err := build.Test(root, targets, build.Options{NinjaArgs: nargs, FullTest: fullTest, TestJobs: testJobs, Profile: bf.profile, DebugInfo: bf.debugInfo, Sanitizers: sans}, print)
 			if err != nil {
 				return err
 			}
@@ -268,7 +297,7 @@ func newTestCmd() *cobra.Command {
 			// The header check is part of the build, so `blade test` -- which builds
 			// its targets -- runs it too. A test failure takes precedence in the exit
 			// code, but the check still reports either way.
-			hdrErr := runHdrCheck(root, targets, bf.hdrCheck, bf.profile)
+			hdrErr := runHdrCheck(root, targets, bf.hdrCheck, bf.profile, sans)
 			if passed != len(results) {
 				return fmt.Errorf("%d test(s) failed", len(results)-passed)
 			}
@@ -301,8 +330,12 @@ func newRunCmd() *cobra.Command {
 			if err := bf.checkProfile(); err != nil {
 				return err
 			}
+			sans, err := parseSanitizers(bf.sanitizer)
+			if err != nil {
+				return err
+			}
 			_, nargs := bf.ninja()
-			code, err := build.Run(root, target, progArgs, build.Options{NinjaArgs: nargs, Profile: bf.profile, DebugInfo: bf.debugInfo})
+			code, err := build.Run(root, target, progArgs, build.Options{NinjaArgs: nargs, Profile: bf.profile, DebugInfo: bf.debugInfo, Sanitizers: sans})
 			if err != nil {
 				return err
 			}
@@ -357,7 +390,7 @@ func newQueryCmd() *cobra.Command {
 }
 
 func newCleanCmd() *cobra.Command {
-	var profile string
+	var profile, san string
 	c := &cobra.Command{
 		Use:   "clean [targets...]",
 		Short: "Remove build outputs (ninja -t clean); keeps the vcpkg tree",
@@ -369,10 +402,14 @@ func newCleanCmd() *cobra.Command {
 			if profile != "" && profile != "release" && profile != "debug" {
 				return fmt.Errorf("invalid --profile %q (want release or debug)", profile)
 			}
+			sans, err := parseSanitizers(san)
+			if err != nil {
+				return err
+			}
 			if len(targets) == 0 {
 				targets = []string{"//..."} // clean everything by default
 			}
-			if err := build.Clean(root, targets, profile); err != nil {
+			if err := build.Clean(root, targets, profile, sans); err != nil {
 				return err
 			}
 			fmt.Println("blade: cleaned")
@@ -380,13 +417,14 @@ func newCleanCmd() *cobra.Command {
 		},
 	}
 	c.Flags().StringVarP(&profile, "profile", "p", "release", "which profile's outputs to clean: release|debug")
+	c.Flags().StringVar(&san, "sanitizer", "", "which sanitizer variant's outputs to clean")
 	c.FParseErrWhitelist.UnknownFlags = true // tolerate Blade's clean flags
 	return c
 }
 
 func newDumpCmd() *cobra.Command {
 	var compdb bool
-	var toFile, profile string
+	var toFile, profile, san string
 	c := &cobra.Command{
 		Use:   "dump --compdb [--to-file F] [targets...]",
 		Short: "Dump internal information (currently: --compdb compile_commands.json)",
@@ -401,10 +439,14 @@ func newDumpCmd() *cobra.Command {
 			if profile != "" && profile != "release" && profile != "debug" {
 				return fmt.Errorf("invalid --profile %q (want release or debug)", profile)
 			}
+			sans, err := parseSanitizers(san)
+			if err != nil {
+				return err
+			}
 			if len(targets) == 0 {
 				targets = []string{"//..."}
 			}
-			out, err := build.CompileDB(root, targets, profile)
+			out, err := build.CompileDB(root, targets, profile, sans)
 			if err != nil {
 				return err
 			}
@@ -422,6 +464,7 @@ func newDumpCmd() *cobra.Command {
 	c.Flags().BoolVar(&compdb, "compdb", false, "dump the compilation database (compile_commands.json)")
 	c.Flags().StringVar(&toFile, "to-file", "", "write to this file (default: stdout)")
 	c.Flags().StringVarP(&profile, "profile", "p", "release", "build profile: release|debug")
+	c.Flags().StringVar(&san, "sanitizer", "", "sanitizer variant's compile commands")
 	c.FParseErrWhitelist.UnknownFlags = true
 	return c
 }

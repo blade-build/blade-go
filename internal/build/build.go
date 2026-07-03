@@ -26,6 +26,7 @@ import (
 	"github.com/blade-build/blade-go/internal/label"
 	"github.com/blade-build/blade-go/internal/loader"
 	"github.com/blade-build/blade-go/internal/ninja"
+	"github.com/blade-build/blade-go/internal/sanitizer"
 	"github.com/blade-build/blade-go/internal/toolchain"
 )
 
@@ -243,21 +244,27 @@ func FindRoot(start string) (string, error) {
 
 // Options controls a build.
 type Options struct {
-	RunNinja  bool     // run ninja after generating build.ninja
-	NinjaArgs []string // extra ninja flags (e.g. -j N, -k 0, -n) from the CLI
-	FullTest  bool     // re-run every test, ignoring the incremental cache
-	TestJobs  int      // parallel test workers (0 = CPUs available to the process, cgroup-aware)
-	Profile   string   // "release" (default) or "debug"; selects build_<profile> + flags
-	DebugInfo string   // "" (project default) or no|low|mid|high (-g level)
+	RunNinja   bool     // run ninja after generating build.ninja
+	NinjaArgs  []string // extra ninja flags (e.g. -j N, -k 0, -n) from the CLI
+	FullTest   bool     // re-run every test, ignoring the incremental cache
+	TestJobs   int      // parallel test workers (0 = CPUs available to the process, cgroup-aware)
+	Profile    string   // "release" (default) or "debug"; selects build_<profile> + flags
+	DebugInfo  string   // "" (project default) or no|low|mid|high (-g level)
+	Sanitizers []string // canonical sanitizer set (nil = off); adds a build-dir tag + flags
 }
 
-// buildDirFor is the output directory for a profile: build_release / build_debug.
-// An empty or unknown profile falls back to release.
-func buildDirFor(profile string) string {
+// buildDirFor is the output directory for a profile + sanitizer set:
+// build_<profile> or build_<profile>_<tag> (e.g. build_release_asan). An empty
+// or unknown profile falls back to release.
+func buildDirFor(profile string, sanitizers []string) string {
+	dir := "build_release"
 	if profile == "debug" {
-		return "build_debug"
+		dir = "build_debug"
 	}
-	return "build_release"
+	if tag := sanitizer.BuildTag(sanitizers); tag != "" {
+		dir += "_" + tag
+	}
+	return dir
 }
 
 // normProfile normalizes a profile string, defaulting to release.
@@ -305,9 +312,9 @@ func (t *timing) report(nodes int) {
 // loadGraph loads BLADE_ROOT config and resolves the dependency graph for the
 // given target patterns (no ninja generation, no vcpkg install). Shared by plan
 // (which then generates) and Query (which only inspects the graph).
-func loadGraph(root string, targets []string, profile string) (*loader.Loader, *graph.Graph, []string, error) {
+func loadGraph(root string, targets []string, buildDir string) (*loader.Loader, *graph.Graph, []string, error) {
 	l := loader.New(root)
-	l.BuildDir = buildDirFor(profile) // the build-dir mirror must match the profile's output tree
+	l.BuildDir = buildDir // the build-dir mirror must match the actual output tree
 	bladeRoot := filepath.Join(root, "BLADE_ROOT")
 	if _, err := os.Stat(bladeRoot); err == nil {
 		if err := l.LoadConfigFile(bladeRoot); err != nil {
@@ -328,17 +335,20 @@ func loadGraph(root string, targets []string, profile string) (*loader.Loader, *
 
 // plan loads the workspace and produces the graph, generator, and ninja file for
 // the given targets (patterns are expanded to concrete labels, also returned).
-func plan(root string, targets []string, profile, debugInfo string) (*graph.Graph, *cc.Generator, *ninja.File, []string, error) {
+func plan(root string, targets []string, profile, debugInfo string, sanitizers []string) (*graph.Graph, *cc.Generator, *ninja.File, []string, error) {
 	tm := newTiming()
-	l, g, expanded, err := loadGraph(root, targets, profile)
+	buildDir := buildDirFor(profile, sanitizers)
+	l, g, expanded, err := loadGraph(root, targets, buildDir)
 	if err != nil {
 		return nil, nil, nil, nil, err
 	}
 	tm.mark("load+graph")
 	gen := cc.New(toolchain.Detect())
 	gen.Root = root
-	gen.BuildDir = buildDirFor(profile)
+	gen.BuildDir = buildDir
 	gen.Profile = normProfile(profile)
+	gen.SanitizeCompile = sanitizer.CompileFlags(sanitizers)
+	gen.SanitizeLink = sanitizer.LinkFlags(sanitizers)
 	// Debug-info level: --debug-info-level override, else global_config, else the
 	// project's own -g flags (empty here).
 	gen.DebugInfo = debugInfo
@@ -392,7 +402,7 @@ func runNinja(root, buildFile string, extraArgs ...string) error {
 // Build loads the workspace, generates the ninja file for the given targets, and
 // (optionally) runs ninja. It returns the path of the generated ninja file.
 func Build(root string, targets []string, opt Options) (string, error) {
-	_, gen, f, _, err := plan(root, targets, opt.Profile, opt.DebugInfo)
+	_, gen, f, _, err := plan(root, targets, opt.Profile, opt.DebugInfo, opt.Sanitizers)
 	if err != nil {
 		return "", err
 	}
@@ -416,8 +426,9 @@ func Build(root string, targets []string, opt Options) (string, error) {
 // cc_config.hdr_dep_missing_severity (Blade parity), else Warn. Returns the
 // sorted issues and the effective severity so the caller can report and decide
 // whether to fail.
-func CheckHdrs(root string, targets []string, override, profile string) ([]hdrcheck.Issue, error) {
-	l, g, expanded, err := loadGraph(root, targets, profile)
+func CheckHdrs(root string, targets []string, override, profile string, sanitizers []string) ([]hdrcheck.Issue, error) {
+	bd := buildDirFor(profile, sanitizers)
+	l, g, expanded, err := loadGraph(root, targets, bd)
 	if err != nil {
 		return nil, err
 	}
@@ -454,7 +465,6 @@ func CheckHdrs(root string, targets []string, override, profile string) ([]hdrch
 	// Extra -I roots (cc_config.extra_incs) + their build-dir mirror, so a header
 	// included via one of them (flare's `#include "blake3/blake3.h"` under
 	// `-Ithirdparty`) resolves to its owning target's full workspace-relative hdr.
-	bd := buildDirFor(profile)
 	var incDirs []string
 	blade := bladectx.BuildModule("", bd, l.Config)
 	for _, d := range evalConfigList(l.Config, "cc_config", "extra_incs", blade) {
@@ -509,8 +519,8 @@ func DefaultJobs() int {
 // for the requested targets. It plans + writes the ninja file, then asks ninja
 // itself (`ninja -t compdb`) to emit the JSON for the compile rules -- reusing
 // the exact commands ninja would run, so the database always matches the build.
-func CompileDB(root string, targets []string, profile string) ([]byte, error) {
-	_, gen, f, _, err := plan(root, targets, profile, "")
+func CompileDB(root string, targets []string, profile string, sanitizers []string) ([]byte, error) {
+	_, gen, f, _, err := plan(root, targets, profile, "", sanitizers)
 	if err != nil {
 		return nil, err
 	}
@@ -549,7 +559,7 @@ type TestResult struct {
 // opt.FullTest. (Environment variables are deliberately not part of the
 // fingerprint -- blade-go doesn't set test env yet; revisit if it ever does.)
 func Test(root string, targets []string, opt Options, onResult func(TestResult)) ([]TestResult, error) {
-	g, gen, f, expanded, err := plan(root, targets, opt.Profile, opt.DebugInfo)
+	g, gen, f, expanded, err := plan(root, targets, opt.Profile, opt.DebugInfo, opt.Sanitizers)
 	if err != nil {
 		return nil, err
 	}
@@ -583,6 +593,15 @@ func Test(root string, targets []string, opt Options, onResult func(TestResult))
 		}
 	}
 
+	// Sanitizer *_OPTIONS defaults so a detection reliably fails the test -- but
+	// only for keys the user hasn't already set in the environment.
+	var sanExtra []string
+	for k, v := range sanitizer.RuntimeEnv(opt.Sanitizers) {
+		if _, set := os.LookupEnv(k); !set {
+			sanExtra = append(sanExtra, k+"="+v)
+		}
+	}
+
 	var mu sync.Mutex // guards results, hist, and onResult ordering
 	var results []TestResult
 	runOne := func(node *graph.Node) {
@@ -610,6 +629,9 @@ func Test(root string, targets []string, opt Options, onResult func(TestResult))
 		cmd := exec.Command(filepath.Join(root, binRel))
 		if runDir != "" {
 			cmd.Dir = runDir // isolated cwd + staged testdata
+		}
+		if len(sanExtra) > 0 {
+			cmd.Env = append(os.Environ(), sanExtra...)
 		}
 		out, runErr := cmd.CombinedOutput() // the slow part -- runs unlocked
 		res := TestResult{Label: node.Label(), Passed: runErr == nil, Output: string(out)}
@@ -699,7 +721,7 @@ func testFingerprint(root, binRel string, n *graph.Node) string {
 // Run builds a single runnable target (cc_binary or cc_test) and executes it,
 // forwarding args and the current stdio; it returns the program's exit code.
 func Run(root, target string, args []string, opt Options) (int, error) {
-	g, gen, f, _, err := plan(root, []string{target}, opt.Profile, opt.DebugInfo)
+	g, gen, f, _, err := plan(root, []string{target}, opt.Profile, opt.DebugInfo, opt.Sanitizers)
 	if err != nil {
 		return 1, err
 	}
@@ -817,11 +839,11 @@ func testdataEntries(root string, n *graph.Node) []testdataEntry {
 // The ninja graph is regenerated for the requested targets so `ninja -t clean`
 // removes exactly their outputs. If nothing has been built yet (no build dir),
 // it is a no-op.
-func Clean(root string, targets []string, profile string) error {
-	if _, err := os.Stat(filepath.Join(root, buildDirFor(profile))); os.IsNotExist(err) {
+func Clean(root string, targets []string, profile string, sanitizers []string) error {
+	if _, err := os.Stat(filepath.Join(root, buildDirFor(profile, sanitizers))); os.IsNotExist(err) {
 		return nil // nothing built, nothing to clean
 	}
-	_, gen, f, _, err := plan(root, targets, profile, "")
+	_, gen, f, _, err := plan(root, targets, profile, "", sanitizers)
 	if err != nil {
 		return err
 	}
@@ -842,7 +864,7 @@ type QueryResult struct {
 // its transitive dependencies (dependents=false) or transitive dependents
 // (dependents=true, the reverse closure).
 func Query(root string, targets []string, dependents bool) ([]QueryResult, error) {
-	_, g, _, err := loadGraph(root, []string{"//..."}, "release") // deps are profile-independent
+	_, g, _, err := loadGraph(root, []string{"//..."}, buildDirFor("release", nil)) // deps are profile-independent
 	if err != nil {
 		return nil, err
 	}
