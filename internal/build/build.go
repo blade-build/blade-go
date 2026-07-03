@@ -43,6 +43,15 @@ func configureCcFlags(gen *cc.Generator, cfg *config.Config) {
 	gen.Cppflags = cpp
 	gen.Cxxflags = evalConfigList(cfg, "cc_config", "cxxflags", blade)
 	gen.Cflags = evalConfigList(cfg, "cc_config", "cflags", blade)
+
+	// warnings apply to all C-family compiles; c_warnings/cxx_warnings add the
+	// per-language ones. Kept in a separate ninja var so generated code (protoc /
+	// resource) opts out, matching Blade.
+	warn := evalConfigList(cfg, "cc_config", "warnings", blade)
+	gen.CWarnings = append(append([]string{}, warn...), evalConfigList(cfg, "cc_config", "c_warnings", blade)...)
+	gen.CxxWarnings = append(append([]string{}, warn...), evalConfigList(cfg, "cc_config", "cxx_warnings", blade)...)
+	gen.Linkflags = evalConfigList(cfg, "cc_config", "linkflags", blade)
+	gen.Optimize = evalConfigList(cfg, "cc_config", "optimize", blade)
 }
 
 // evalConfigList returns a config list item as []string, evaluating a lambda
@@ -450,6 +459,14 @@ func CheckHdrs(root string, targets []string, override, profile string) ([]hdrch
 	for _, d := range evalConfigList(l.Config, "cc_config", "extra_incs", blade) {
 		incDirs = append(incDirs, d, bd+"/"+d)
 	}
+	// Headers the project allows to be included without a declared dep.
+	var allowUndec map[string]bool
+	if hs := evalConfigList(l.Config, "cc_config", "allowed_undeclared_hdrs", blade); len(hs) > 0 {
+		allowUndec = make(map[string]bool, len(hs))
+		for _, h := range hs {
+			allowUndec[h] = true
+		}
+	}
 	tc := toolchain.Detect()
 	issues := hdrcheck.Check(g.All(), hdrcheck.Options{
 		Root:           root,
@@ -458,6 +475,7 @@ func CheckHdrs(root string, targets []string, override, profile string) ([]hdrch
 		Severity:       sev,
 		UnusedSeverity: unusedSev,
 		IncludeDirs:    incDirs,
+		AllowUndec:     allowUndec,
 		Only:           only,
 	})
 	return issues, nil
