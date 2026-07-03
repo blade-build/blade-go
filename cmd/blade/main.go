@@ -131,6 +131,15 @@ func (bf *buildFlags) ninja() (run bool, args []string) {
 	return run, args
 }
 
+// checkProfile validates -p/--profile (blade-go implements release and debug).
+func (bf *buildFlags) checkProfile() error {
+	switch bf.profile {
+	case "", "release", "debug":
+		return nil
+	}
+	return fmt.Errorf("invalid --profile %q (want release or debug)", bf.profile)
+}
+
 func newBuildCmd() *cobra.Command {
 	var bf buildFlags
 	c := &cobra.Command{
@@ -142,8 +151,11 @@ func newBuildCmd() *cobra.Command {
 			if err != nil {
 				return err
 			}
+			if err := bf.checkProfile(); err != nil {
+				return err
+			}
 			run, nargs := bf.ninja()
-			ninjaFile, err := build.Build(root, targets, build.Options{RunNinja: run, NinjaArgs: nargs})
+			ninjaFile, err := build.Build(root, targets, build.Options{RunNinja: run, NinjaArgs: nargs, Profile: bf.profile})
 			if err != nil {
 				return err
 			}
@@ -155,7 +167,7 @@ func newBuildCmd() *cobra.Command {
 			// The header check reads the `.d` depfiles a build produces, so run
 			// it only when we actually built (not --no-build / --stop-after).
 			if run {
-				return runHdrCheck(root, targets, bf.hdrCheck)
+				return runHdrCheck(root, targets, bf.hdrCheck, bf.profile)
 			}
 			return nil
 		},
@@ -169,8 +181,8 @@ func newBuildCmd() *cobra.Command {
 // project's cc_config. Returns an error (failing the command) only when the
 // effective severity is "error" and issues were found; "warn" prints and returns
 // nil; "off" is a no-op.
-func runHdrCheck(root string, targets []string, override string) error {
-	issues, sev, err := build.CheckHdrs(root, targets, override)
+func runHdrCheck(root string, targets []string, override, profile string) error {
+	issues, sev, err := build.CheckHdrs(root, targets, override, profile)
 	if err != nil {
 		return err
 	}
@@ -204,6 +216,9 @@ func newTestCmd() *cobra.Command {
 			if err != nil {
 				return err
 			}
+			if err := bf.checkProfile(); err != nil {
+				return err
+			}
 			_, nargs := bf.ninja()
 			// Stream each result as it finishes so a large suite shows progress
 			// instead of looking hung until the last (possibly slow) test ends.
@@ -221,7 +236,7 @@ func newTestCmd() *cobra.Command {
 					fmt.Print(r.Output)
 				}
 			}
-			results, err := build.Test(root, targets, build.Options{NinjaArgs: nargs, FullTest: fullTest, TestJobs: testJobs}, print)
+			results, err := build.Test(root, targets, build.Options{NinjaArgs: nargs, FullTest: fullTest, TestJobs: testJobs, Profile: bf.profile}, print)
 			if err != nil {
 				return err
 			}
@@ -245,7 +260,7 @@ func newTestCmd() *cobra.Command {
 			// The header check is part of the build, so `blade test` -- which builds
 			// its targets -- runs it too. A test failure takes precedence in the exit
 			// code, but the check still reports either way.
-			hdrErr := runHdrCheck(root, targets, bf.hdrCheck)
+			hdrErr := runHdrCheck(root, targets, bf.hdrCheck, bf.profile)
 			if passed != len(results) {
 				return fmt.Errorf("%d test(s) failed", len(results)-passed)
 			}
@@ -275,8 +290,11 @@ func newRunCmd() *cobra.Command {
 			if err != nil {
 				return err
 			}
+			if err := bf.checkProfile(); err != nil {
+				return err
+			}
 			_, nargs := bf.ninja()
-			code, err := build.Run(root, target, progArgs, build.Options{NinjaArgs: nargs})
+			code, err := build.Run(root, target, progArgs, build.Options{NinjaArgs: nargs, Profile: bf.profile})
 			if err != nil {
 				return err
 			}
@@ -331,6 +349,7 @@ func newQueryCmd() *cobra.Command {
 }
 
 func newCleanCmd() *cobra.Command {
+	var profile string
 	c := &cobra.Command{
 		Use:   "clean [targets...]",
 		Short: "Remove build outputs (ninja -t clean); keeps the vcpkg tree",
@@ -339,16 +358,20 @@ func newCleanCmd() *cobra.Command {
 			if err != nil {
 				return err
 			}
+			if profile != "" && profile != "release" && profile != "debug" {
+				return fmt.Errorf("invalid --profile %q (want release or debug)", profile)
+			}
 			if len(targets) == 0 {
 				targets = []string{"//..."} // clean everything by default
 			}
-			if err := build.Clean(root, targets); err != nil {
+			if err := build.Clean(root, targets, profile); err != nil {
 				return err
 			}
 			fmt.Println("blade: cleaned")
 			return nil
 		},
 	}
+	c.Flags().StringVarP(&profile, "profile", "p", "release", "which profile's outputs to clean: release|debug")
 	c.FParseErrWhitelist.UnknownFlags = true // tolerate Blade's clean flags
 	return c
 }

@@ -17,6 +17,7 @@ import (
 type Generator struct {
 	Tc               *toolchain.Toolchain
 	BuildDir         string           // build output dir (e.g. "build64_release")
+	Profile          string           // "release" or "debug" (drives optimize/NDEBUG flags)
 	Self             string           // path to the blade-go binary (resource_library codegen)
 	Protoc           string           // protoc executable (proto_library codegen)
 	ProtobufLibs     []string         // system libs a proto_library pulls in (bare names)
@@ -42,10 +43,21 @@ func New(tc *toolchain.Toolchain) *Generator {
 	return &Generator{
 		Tc:           tc,
 		BuildDir:     "build64_release",
+		Profile:      "release",
 		Protoc:       "protoc",
 		ProtobufLibs: []string{"protobuf", "pthread"},
 		Vcpkg:        vcpkg.FromEnv(),
 	}
+}
+
+// profileFlags returns the compile flags that differ by build profile, matching
+// Python Blade: release optimizes (-O2) and defines NDEBUG; debug leaves asserts
+// live and unoptimized (-O0) and adds the stack protector.
+func (gen *Generator) profileFlags() []string {
+	if gen.Profile == "debug" {
+		return []string{"-O0", "-fstack-protector"}
+	}
+	return []string{"-O2", "-DNDEBUG"} // release (default)
 }
 
 // IsCC reports whether a rule type is one this generator handles.
@@ -74,7 +86,11 @@ func (gen *Generator) Generate(g *graph.Graph) (*ninja.File, error) {
 	}
 	f.SetVar("self", self)
 	f.SetVar("builddir", gen.BuildDir)
-	f.SetVar("cppflags", strings.Join(gen.Cppflags, " "))
+	// Profile flags mirror Python Blade: release optimizes and defines NDEBUG;
+	// debug does neither (asserts stay live, unoptimized) and enables the stack
+	// protector. Debug info (-gdwarf-2) comes from the project's cc_config in both.
+	cpp := append(append([]string{}, gen.Cppflags...), gen.profileFlags()...)
+	f.SetVar("cppflags", strings.Join(cpp, " "))
 	f.SetVar("cxxflags", strings.Join(gen.Cxxflags, " "))
 	f.SetVar("cflags", strings.Join(gen.Cflags, " "))
 	gen.emitRules(f)
