@@ -237,7 +237,7 @@ type Options struct {
 	RunNinja  bool     // run ninja after generating build.ninja
 	NinjaArgs []string // extra ninja flags (e.g. -j N, -k 0, -n) from the CLI
 	FullTest  bool     // re-run every test, ignoring the incremental cache
-	TestJobs  int      // parallel test workers (0 = number of CPUs)
+	TestJobs  int      // parallel test workers (0 = CPUs available to the process, cgroup-aware)
 }
 
 // timing reports per-phase front-end durations to stderr when BLADE_TIMING is
@@ -409,6 +409,29 @@ func CheckHdrs(root string, targets []string, override string) ([]hdrcheck.Issue
 	return issues, sev, nil
 }
 
+// DefaultJobs is the default parallelism for both building and testing when the
+// user gives no explicit count: the number of CPUs effectively available to this
+// process. runtime.GOMAXPROCS(0) is used rather than runtime.NumCPU() because on
+// Go 1.25+ GOMAXPROCS defaults to the cgroup CPU limit on Linux -- so a container
+// capped at N CPUs on a many-core host gets N, not the host count.
+//
+// This matters most for the build: ninja's own default (`sched_getaffinity` + 2)
+// sees a cpuset limit but NOT a CFS quota (`docker --cpus=N`, the common case),
+// so it would launch host-many parallel compilers in such a container and risk
+// OOM. Passing DefaultJobs() as the default -j closes that gap. GOMAXPROCS covers
+// both cpuset and CFS quota. It is the logical (hyperthread) count, not physical;
+// physical-core detection needs per-OS probing / a dependency and isn't worth it.
+//
+// Build and test parallelism stay independent (separate flags / code paths): a
+// distributed build can crank `-j` far past local cores without touching test
+// concurrency, which must stay bounded by the local machine.
+func DefaultJobs() int {
+	if n := runtime.GOMAXPROCS(0); n > 0 {
+		return n
+	}
+	return 1
+}
+
 // TestResult is the outcome of running one cc_test target.
 type TestResult struct {
 	Label  string
@@ -502,7 +525,7 @@ func Test(root string, targets []string, opt Options, onResult func(TestResult))
 
 	jobs := opt.TestJobs
 	if jobs <= 0 {
-		jobs = runtime.NumCPU()
+		jobs = DefaultJobs()
 	}
 	sem := make(chan struct{}, jobs)
 	var wg sync.WaitGroup
