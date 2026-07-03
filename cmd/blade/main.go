@@ -71,7 +71,7 @@ type buildFlags struct {
 // register adds the flags to fs and tolerates unknown Blade flags.
 func (bf *buildFlags) register(c *cobra.Command) {
 	f := c.Flags()
-	f.IntVarP(&bf.jobs, "jobs", "j", 0, "number of parallel build jobs (ninja -j)")
+	f.IntVarP(&bf.jobs, "jobs", "j", 0, "parallel build jobs / ninja -j (0 = CPUs available to the process, cgroup-aware; set high for distributed builds)")
 	f.BoolVarP(&bf.keepGoing, "keep-going", "k", false, "keep building after errors (ninja -k 0)")
 	f.BoolVarP(&bf.dryRun, "dry-run", "n", false, "don't run build commands (ninja -n)")
 	f.BoolVar(&bf.noBuild, "no-build", false, "generate build.ninja but don't run ninja")
@@ -112,9 +112,16 @@ func (bf *buildFlags) ninja() (run bool, args []string) {
 	if bf.noBuild {
 		run = false
 	}
-	if bf.jobs > 0 {
-		args = append(args, "-j", strconv.Itoa(bf.jobs))
+	// Always pass an explicit -j. When unset, use the cgroup-aware CPU count
+	// rather than letting ninja pick: ninja's default respects a cpuset but not a
+	// CFS quota (docker --cpus=N), so it would over-parallelize in that common
+	// container case and risk OOM. An explicit -j (e.g. large, for distributed
+	// builds) overrides this.
+	jobs := bf.jobs
+	if jobs <= 0 {
+		jobs = build.DefaultJobs()
 	}
+	args = append(args, "-j", strconv.Itoa(jobs))
 	if bf.keepGoing {
 		args = append(args, "-k", "0")
 	}
@@ -247,7 +254,7 @@ func newTestCmd() *cobra.Command {
 	}
 	bf.register(c)
 	c.Flags().BoolVar(&fullTest, "full-test", false, "re-run every test, ignoring the incremental cache")
-	c.Flags().IntVar(&testJobs, "test-jobs", 0, "parallel test workers (0 = number of CPUs; exclusive tests always run serially)")
+	c.Flags().IntVar(&testJobs, "test-jobs", 0, "parallel test workers (0 = CPUs available to the process, cgroup-aware; exclusive tests always run serially)")
 	return c
 }
 
