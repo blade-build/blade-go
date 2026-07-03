@@ -235,10 +235,14 @@ func newTestCmd() *cobra.Command {
 				note = fmt.Sprintf(" (%d cached)", cached)
 			}
 			fmt.Printf("blade: %d/%d tests passed%s\n", passed, len(results), note)
+			// The header check is part of the build, so `blade test` -- which builds
+			// its targets -- runs it too. A test failure takes precedence in the exit
+			// code, but the check still reports either way.
+			hdrErr := runHdrCheck(root, targets, bf.hdrCheck)
 			if passed != len(results) {
 				return fmt.Errorf("%d test(s) failed", len(results)-passed)
 			}
-			return nil
+			return hdrErr
 		},
 	}
 	bf.register(c)
