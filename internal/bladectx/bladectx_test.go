@@ -2,6 +2,7 @@ package bladectx
 
 import (
 	"os"
+	"path/filepath"
 	"testing"
 
 	"go.starlark.net/starlark"
@@ -101,7 +102,10 @@ func TestPathExistsRelAbs(t *testing.T) {
 	if got := run(`blade.path.relpath('a/b/c', 'a')`); string(got.(starlark.String)) != "b/c" {
 		t.Errorf("relpath=%v", got)
 	}
-	if got := run(`blade.path.abspath('x')`); !starlarkStrHasPrefix(got, "/") {
+	// abspath returns a native absolute path (Blade parity: os.path.abspath),
+	// which is drive-lettered on Windows (C:\...\x), so check absoluteness
+	// platform-neutrally rather than assuming a leading '/'.
+	if got := run(`blade.path.abspath('x')`); !filepath.IsAbs(string(got.(starlark.String))) {
 		t.Errorf("abspath not absolute: %v", got)
 	}
 }

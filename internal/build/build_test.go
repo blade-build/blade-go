@@ -13,6 +13,7 @@ import (
 	"github.com/blade-build/blade-go/internal/graph"
 	"github.com/blade-build/blade-go/internal/ninjaparse"
 	"github.com/blade-build/blade-go/internal/target"
+	"github.com/blade-build/blade-go/internal/toolchain"
 )
 
 func TestFindRoot(t *testing.T) {
@@ -68,9 +69,10 @@ func TestBuildGeneratesNinja(t *testing.T) {
 		t.Fatal(err)
 	}
 	out := string(data)
+	tc := toolchain.Detect() // same naming the generator uses (MSVC on Windows)
 	for _, want := range []string{
-		"build build_release/base/libbase.a: ar",
-		"build build_release/app/app: link",
+		"build build_release/base/" + tc.StaticLib("base") + ": ar",
+		"build build_release/app/" + tc.BinName("app") + ": link",
 	} {
 		if !strings.Contains(out, want) {
 			t.Errorf("generated ninja missing %q\n%s", want, out)
@@ -294,7 +296,7 @@ func TestBuildResourceLibrary(t *testing.T) {
 		t.Errorf("resource embed edge missing:\n%s", out)
 	}
 	// archived and linked by the consumer
-	if !strings.Contains(out, "build_release/res/libr.a") {
+	if !strings.Contains(out, "build_release/res/"+toolchain.Detect().StaticLib("r")) {
 		t.Errorf("resource archive missing:\n%s", out)
 	}
 }
@@ -322,7 +324,7 @@ func TestBuildLinkAllSymbols(t *testing.T) {
 		t.Fatal(err)
 	}
 	out := string(mustRead(t, ninjaFile))
-	archive := "build_release/reg/libreg.a"
+	archive := "build_release/reg/" + toolchain.Detect().StaticLib("reg")
 	// Platform-specific whole-archive wrapping around the archive.
 	if !strings.Contains(out, "-force_load,"+archive) &&
 		!strings.Contains(out, "--whole-archive "+archive) {
@@ -758,7 +760,7 @@ func TestHeaderCompilesWithXCpp(t *testing.T) {
 	if !strings.Contains(out, "-x c++ -c") {
 		t.Errorf("cxx_header rule missing -x c++:\n%s", out)
 	}
-	if !strings.Contains(out, "h.h.o: cxx_header ") {
+	if !strings.Contains(out, "h.h"+toolchain.Detect().ObjSuffix()+": cxx_header ") {
 		t.Errorf("header not compiled via cxx_header:\n%s", out)
 	}
 }
