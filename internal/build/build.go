@@ -22,6 +22,7 @@ import (
 	"github.com/blade-build/blade-go/internal/cc"
 	"github.com/blade-build/blade-go/internal/config"
 	"github.com/blade-build/blade-go/internal/graph"
+	"github.com/blade-build/blade-go/internal/hdrcheck"
 	"github.com/blade-build/blade-go/internal/label"
 	"github.com/blade-build/blade-go/internal/loader"
 	"github.com/blade-build/blade-go/internal/ninja"
@@ -363,6 +364,49 @@ func Build(root string, targets []string, opt Options) (string, error) {
 		}
 	}
 	return buildFile, nil
+}
+
+// CheckHdrs runs the header inclusion-dependency check over the requested
+// targets (whose header closures must already exist in ninja's dep log from a
+// build). Ownership is resolved across the whole loaded graph, but only the
+// requested targets' closure -- expanded from patterns like //pkg/... -- is
+// checked. The effective severity is `override` if non-empty, else the project's
+// cc_config.hdr_dep_missing_severity (Blade parity), else Warn. Returns the
+// sorted issues and the effective severity so the caller can report and decide
+// whether to fail.
+func CheckHdrs(root string, targets []string, override string) ([]hdrcheck.Issue, hdrcheck.Severity, error) {
+	l, g, expanded, err := loadGraph(root, targets)
+	if err != nil {
+		return nil, hdrcheck.Off, err
+	}
+	sev := hdrcheck.Warn
+	if override != "" {
+		s, ok := hdrcheck.ParseSeverity(override)
+		if !ok {
+			return nil, hdrcheck.Off, fmt.Errorf("invalid --hdr-check value %q (want off|warn|error)", override)
+		}
+		sev = s
+	} else if v, ok := l.Config.GetItem("cc_config", "hdr_dep_missing_severity"); ok {
+		if s, ok := v.(string); ok {
+			sev = hdrcheck.SeverityFromBlade(s)
+		}
+	}
+	if sev == hdrcheck.Off {
+		return nil, hdrcheck.Off, nil
+	}
+	only := make(map[string]bool, len(expanded))
+	for _, lbl := range expanded {
+		only[lbl] = true
+	}
+	tc := toolchain.Detect()
+	issues := hdrcheck.Check(g.All(), hdrcheck.Options{
+		Root:      root,
+		BuildDir:  cc.New(tc).BuildDir,
+		ObjSuffix: tc.ObjSuffix(),
+		Severity:  sev,
+		Only:      only,
+	})
+	return issues, sev, nil
 }
 
 // TestResult is the outcome of running one cc_test target.

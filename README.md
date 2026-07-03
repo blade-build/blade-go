@@ -131,6 +131,7 @@ blade test --full-test //flare/base/...             # force re-run, ignoring the
 blade run //flare/example/rpc:server -- --port 80   # build + run; args after -- go to it
 blade clean                                         # remove the build output dir
 blade query --deps //flare/base:logging             # transitive deps (--dependents for reverse)
+blade build --hdr-check=error //flare/rpc:rpc        # fail on undeclared header deps
 ```
 
 | flag | effect |
@@ -140,11 +141,30 @@ blade query --deps //flare/base:logging             # transitive deps (--depende
 | `-n, --dry-run` | ninja `-n` |
 | `--no-build`, `--stop-after {load,analyze,generate}` | generate `build.ninja`, don't run ninja |
 | `-p, --profile {release,debug}` | build profile (release implemented) |
+| `--hdr-check {off,warn,error}` | header inclusion-dependency check (default: project `cc_config`) |
 
 Targets accept patterns: `//pkg:name`, `//pkg:*` (a package), `//pkg/...`
 (recursive), `//...` (all). Blade flags blade-go doesn't implement yet
 (`--coverage`, `--sanitizer`, `--generate-*`, …) are accepted and ignored, so an
 existing Blade invocation still runs.
+
+### Header inclusion check
+
+After a build, blade-go verifies that every project header a source *directly*
+`#include`s belongs to a cc target the including target declares in `deps` (or to
+itself) — Blade's inclusion-dependency check. It reports **missing dependency**
+(header owned by a non-dependency), **private header** (another target's `srcs`
+header), and **undeclared** (owned by no cc target). Severity defaults to the
+project's `cc_config.hdr_dep_missing_severity`; `--hdr-check {off,warn,error}`
+overrides it.
+
+The mechanism differs from Python Blade (which wraps every compile with `-H` to
+record an inclusion stack): blade-go reads the header closure ninja already
+recorded (`ninja -t deps`) and intersects it with a regex scan of each source's
+literal `#include`s. That drops dead `#if 0` branches, commented includes, and —
+being absolute in the dep log — all system / vcpkg / thirdparty headers, leaving
+exactly the first-party headers to check. The closure source is pluggable, so a
+native-MSVC (`deps = msvc`) backend slots in without touching the check.
 
 ## Performance
 
