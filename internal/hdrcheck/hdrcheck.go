@@ -66,18 +66,21 @@ const (
 	MissingDep
 	// PrivateHeader: the header is another target's private (srcs) header.
 	PrivateHeader
+	// UnusedDep: a declared dep none of whose public headers is directly included.
+	UnusedDep
 )
 
 // Issue is one inclusion-dependency violation.
 type Issue struct {
 	Target    string   // the including target's label ("//pkg:name")
 	TargetPos string   // the target's BUILD location "pkg/BUILD:line:col" (for the fix-it note)
-	Source    string   // the src/hdr file (workspace-relative) with the bad #include
+	Source    string   // the src/hdr file (workspace-relative) with the bad #include (empty for UnusedDep)
 	Line      int      // 1-based line of the offending #include in Source
 	Col       int      // 1-based column of the '#' in Source
-	Header    string   // the offending header (workspace-relative)
+	Header    string   // the offending header (workspace-relative; empty for UnusedDep)
 	Kind      Kind     // why it is bad
-	Owners    []string // labels that own Header (for MissingDep / PrivateHeader)
+	Owners    []string // labels that own Header (MissingDep/PrivateHeader) or the unused dep (UnusedDep)
+	Sev       Severity // the severity this issue is reported at (inclusion vs unused differ)
 }
 
 // ccTypes are the target rules whose srcs/hdrs participate in the check.
@@ -99,12 +102,18 @@ type ClosureSource interface {
 
 // Options configures a check run.
 type Options struct {
-	Root       string          // workspace root (abs)
-	BuildDir   string          // e.g. "build_release"
-	ObjSuffix  string          // e.g. ".o"
-	Severity   Severity        // Off skips entirely
-	Closure    ClosureSource   // nil => NinjaDepsClosure over BuildDir/build.ninja
-	AllowUndec map[string]bool // headers exempt from the Undeclared verdict
+	Root           string          // workspace root (abs)
+	BuildDir       string          // e.g. "build_release"
+	ObjSuffix      string          // e.g. ".o"
+	Severity       Severity        // inclusion check (undeclared/missing/private); Off disables it
+	UnusedSeverity Severity        // unused-deps check; Off disables it (independent of Severity)
+	Closure        ClosureSource   // nil => NinjaDepsClosure over BuildDir/build.ninja
+	AllowUndec     map[string]bool // headers exempt from the Undeclared verdict
+	// IncludeDirs are extra workspace-relative -I roots (e.g. "thirdparty",
+	// "build_release/thirdparty"). An include spelled relative to one of these
+	// (flare's `#include "blake3/blake3.h"` under `-Ithirdparty`) resolves to its
+	// full workspace-relative path so it matches the owning target's declared hdr.
+	IncludeDirs []string
 	// Only, if non-nil, restricts which targets are *checked* to this label set
 	// (ownership maps are still built from every node, so deps resolve). Mirrors
 	// Python Blade checking only the requested targets, not their dependencies.
@@ -119,7 +128,7 @@ var includeRE = regexp.MustCompile(`(?m)^[ \t]*#[ \t]*include[ \t]*(?:"([^"]+)"|
 // owned by any loaded target resolves even if that target was pulled in only as a
 // transitive dep.
 func Check(nodes []*graph.Node, opt Options) []Issue {
-	if opt.Severity == Off {
+	if opt.Severity == Off && opt.UnusedSeverity == Off {
 		return nil
 	}
 	if opt.Closure == nil {
@@ -135,6 +144,7 @@ func Check(nodes []*graph.Node, opt Options) []Issue {
 	public := map[string]map[string]bool{}
 	private := map[string]map[string]bool{}
 	ownHdrs := map[string]map[string]bool{}
+	pubCount := map[string]int{} // label -> number of public (hdrs) headers, for unused-deps
 	add := func(m map[string]map[string]bool, hdr, lib string) {
 		if m[hdr] == nil {
 			m[hdr] = map[string]bool{}
@@ -151,6 +161,7 @@ func Check(nodes []*graph.Node, opt Options) []Issue {
 			hp := path.Join(n.Target.Package, h)
 			add(public, hp, lib)
 			own[hp] = true
+			pubCount[lib]++
 		}
 		for _, s := range n.Target.AttrStrings("srcs") {
 			if isHeader(s) {
@@ -186,11 +197,54 @@ func Check(nodes []*graph.Node, opt Options) []Issue {
 			}
 		}
 
-		for _, f := range n.Target.AttrStrings("srcs") {
-			issues = checkFile(issues, n, f, pkg, lib, deps, declared, public, private, genPrefix, opt)
+		srcFiles := n.Target.AttrStrings("srcs")
+		hdrFiles := n.Target.AttrStrings("hdrs")
+
+		if opt.Severity != Off {
+			for _, f := range srcFiles {
+				issues = checkFile(issues, n, f, pkg, lib, deps, declared, public, private, genPrefix, opt)
+			}
+			for _, f := range hdrFiles {
+				issues = checkFile(issues, n, f, pkg, lib, deps, declared, public, private, genPrefix, opt)
+			}
 		}
-		for _, f := range n.Target.AttrStrings("hdrs") {
-			issues = checkFile(issues, n, f, pkg, lib, deps, declared, public, private, genPrefix, opt)
+
+		// Unused-deps: a declared dep with public headers, none of which this
+		// target directly includes (across all its srcs AND hdrs). Deps with no
+		// public headers are exempt -- linked for symbols, not headers. Only run
+		// when at least one file was scannable (a pure umbrella lib with no source
+		// files would flag every dep).
+		if opt.UnusedSeverity != Off {
+			used := map[string]bool{}
+			scanned := false
+			for _, f := range append(append([]string{}, srcFiles...), hdrFiles...) {
+				if strings.HasPrefix(path.Join(pkg, f), genPrefix) {
+					continue
+				}
+				if markUsedOwners(path.Join(opt.Root, pkg, f), pkg, public, private, used, opt.IncludeDirs) {
+					scanned = true
+				}
+			}
+			// Umbrella/re-export exemption: any OTHER target that co-owns one of
+			// THIS target's own public headers is implicitly used -- this target
+			// republishes its interface (flare's fiber:fiber re-declares async.h
+			// from fiber:async, so :async is a facade dep, not an unused one).
+			for _, h := range hdrFiles {
+				for o := range public[path.Join(pkg, h)] {
+					used[o] = true
+				}
+			}
+			if scanned {
+				for _, d := range n.Deps {
+					dl := d.Target.Label()
+					if pubCount[dl] > 0 && !used[dl] {
+						issues = append(issues, Issue{
+							Target: lib, TargetPos: relTo(opt.Root, n.Target.Pos),
+							Kind: UnusedDep, Owners: []string{dl}, Sev: opt.UnusedSeverity,
+						})
+					}
+				}
+			}
 		}
 	}
 
@@ -199,14 +253,22 @@ func Check(nodes []*graph.Node, opt Options) []Issue {
 		if a.Target != b.Target {
 			return a.Target < b.Target
 		}
+		if a.Kind != b.Kind {
+			return a.Kind < b.Kind
+		}
 		if a.Source != b.Source {
 			return a.Source < b.Source
 		}
-		return a.Header < b.Header
+		if a.Header != b.Header {
+			return a.Header < b.Header
+		}
+		return strings.Join(a.Owners, ",") < strings.Join(b.Owners, ",")
 	})
 	return issues
 }
 
+// checkFile scans one src/hdr file for inclusion issues (missing-dep / private /
+// undeclared), gated on the compiler's actual header closure.
 func checkFile(issues []Issue, n *graph.Node, f, pkg, lib string,
 	deps, declared map[string]bool,
 	public, private map[string]map[string]bool,
@@ -227,10 +289,10 @@ func checkFile(issues []Issue, n *graph.Node, f, pkg, lib string,
 		return Issue{
 			Target: lib, TargetPos: targetPos,
 			Source: srcPath, Line: dh.line, Col: dh.col,
-			Header: hdr, Kind: kind, Owners: owners,
+			Header: hdr, Kind: kind, Owners: owners, Sev: opt.Severity,
 		}
 	}
-	for _, dh := range directHeaders(path.Join(opt.Root, srcPath), pkg, closure) {
+	for _, dh := range directHeaders(path.Join(opt.Root, srcPath), pkg, closure, opt.IncludeDirs) {
 		hdr := dh.header
 		if declared[hdr] { // own or a direct dep's header
 			continue
@@ -253,6 +315,48 @@ func checkFile(issues []Issue, n *graph.Node, f, pkg, lib string,
 		}
 	}
 	return issues
+}
+
+// resolveCandidates returns the workspace-relative paths an #include spelling
+// could name: as written (via -I.), relative to the including file's own package
+// (implicit for `"..."`), and relative to each extra -I root.
+func resolveCandidates(spell, pkg string, incDirs []string) []string {
+	cands := make([]string, 0, 2+len(incDirs))
+	cands = append(cands, spell, path.Join(pkg, spell))
+	for _, d := range incDirs {
+		cands = append(cands, path.Join(d, spell))
+	}
+	return cands
+}
+
+// markUsedOwners regex-scans absFile's #includes and marks the owning label of
+// every include that resolves to a known project header (public or private) into
+// used. Returns whether the file was readable. Unlike the inclusion check it does
+// NOT apply the compiler closure -- so it also sees includes in public headers
+// (blade-go compiles srcs, not hdrs, so those have no ninja closure) and errs
+// conservative: a dead-branch include over-marks "used" (a false-negative on the
+// unused-deps verdict, never a false-positive).
+func markUsedOwners(absFile, pkg string, public, private map[string]map[string]bool, used map[string]bool, incDirs []string) bool {
+	data, err := os.ReadFile(absFile)
+	if err != nil {
+		return false
+	}
+	for _, m := range includeRE.FindAllStringSubmatch(string(data), -1) {
+		spell := m[1]
+		if spell == "" {
+			spell = m[2]
+		}
+		spell = path.Clean(spell)
+		for _, cand := range resolveCandidates(spell, pkg, incDirs) {
+			for o := range public[cand] {
+				used[o] = true
+			}
+			for o := range private[cand] {
+				used[o] = true
+			}
+		}
+	}
+	return true
 }
 
 // relTo strips a leading "root/" from an absolute location so it prints as a
@@ -280,7 +384,7 @@ type directHdr struct {
 // against the including file's own directory (implicit for `"..."` includes).
 // System/vcpkg headers are absolute in the closure, so a relative spelling never
 // matches them and they drop out here.
-func directHeaders(absFile, pkg string, closure map[string]bool) []directHdr {
+func directHeaders(absFile, pkg string, closure map[string]bool, incDirs []string) []directHdr {
 	f, err := os.Open(absFile)
 	if err != nil {
 		return nil
@@ -304,7 +408,7 @@ func directHeaders(absFile, pkg string, closure map[string]bool) []directHdr {
 		}
 		spell = path.Clean(spell)
 		col := strings.IndexByte(text, '#') + 1 // 1-based column of the '#'
-		for _, cand := range [2]string{spell, path.Join(pkg, spell)} {
+		for _, cand := range resolveCandidates(spell, pkg, incDirs) {
 			if closure[cand] && !seen[cand] {
 				seen[cand] = true
 				out = append(out, directHdr{cand, line, col})
@@ -344,8 +448,18 @@ func sortedKeys(m map[string]bool) []string {
 // editors/terminals that recognize the GCC format. `severity` is "warning" or
 // "error".
 func (i Issue) Format(severity string) string {
-	loc := fmt.Sprintf("%s:%d:%d", i.Source, i.Line, i.Col)
 	owners := strings.Join(i.Owners, " or ")
+	// UnusedDep is a target-level finding (no source line); anchor it at the
+	// target's BUILD stanza instead.
+	if i.Kind == UnusedDep {
+		loc := i.TargetPos
+		if loc == "" {
+			loc = i.Target
+		}
+		return fmt.Sprintf("%s: %s: %s is declared in the deps of %s but none of its headers is directly included [hdr-check: unused dep]",
+			loc, severity, owners, i.Target)
+	}
+	loc := fmt.Sprintf("%s:%d:%d", i.Source, i.Line, i.Col)
 	var msg, note string
 	switch i.Kind {
 	case MissingDep:

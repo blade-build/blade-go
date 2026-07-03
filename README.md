@@ -158,7 +158,10 @@ Blade's inclusion-dependency check. It reports **missing dependency**
 (header owned by a non-dependency), **private header** (another target's `srcs`
 header), and **undeclared** (owned by no cc target). Severity defaults to the
 project's `cc_config.hdr_dep_missing_severity`; `--hdr-check {off,warn,error}`
-overrides it.
+overrides it. It also runs an **unused-deps** check (severity from
+`cc_config.unused_deps_severity`, off by default): a declared dep with public
+headers, none of which the target directly includes — umbrella/re-export facades
+and deps with no public headers are exempt.
 
 Diagnostics are GCC-format (`file:line:col: severity: message`), so editors and
 terminals make both the offending `#include` and the fix-it `BUILD` line
