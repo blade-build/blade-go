@@ -231,6 +231,30 @@ cc_library(name = 'lib', srcs = ['out.cc'], deps = [':mk'])
 	}
 }
 
+// A gen_rule cmd referencing flare's single-overlay-triplet protoc glob is
+// emitted with the concrete blade-go compat dir, not a shell glob -- otherwise,
+// when the build dir is shared with Python Blade, "blade-*" expands to several
+// protoc paths and protoc parses a protoc binary as a .proto.
+func TestGenRuleResolvesProtocGlob(t *testing.T) {
+	g, _ := buildGraph(t, map[string]string{
+		"g/BUILD": `
+gen_rule(name = 'mk', srcs = ['x.proto'], outs = ['x.pb.cc'],
+         cmd = '$BUILD_DIR/.cache/vcpkg/installed/blade-*/tools/protobuf/protoc $SRCS', visibility = ['PUBLIC'])
+`,
+	}, "//g:mk")
+	f, err := New(toolchain.Detect()).Generate(g)
+	if err != nil {
+		t.Fatal(err)
+	}
+	out := f.String()
+	if !strings.Contains(out, "installed/blade-go/tools/protobuf/protoc") {
+		t.Errorf("protoc glob not resolved to concrete blade-go path:\n%s", out)
+	}
+	if strings.Contains(out, "installed/blade-*/") {
+		t.Errorf("shell glob blade-* left in cmd (ambiguous when build dir is shared):\n%s", out)
+	}
+}
+
 func TestEndToEndGenRule(t *testing.T) {
 	if _, err := exec.LookPath("ninja"); err != nil {
 		t.Skip("ninja not available")
