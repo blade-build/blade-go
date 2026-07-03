@@ -52,7 +52,7 @@ func newRootCmd() *cobra.Command {
 		SilenceErrors: false,
 	}
 	root.CompletionOptions.DisableDefaultCmd = true
-	root.AddCommand(newBuildCmd(), newTestCmd(), newRunCmd(), newCleanCmd(), newQueryCmd(), newDumpCmd(), newVersionCmd())
+	root.AddCommand(newBuildCmd(), newTestCmd(), newRunCmd(), newCleanCmd(), newQueryCmd(), newDumpCmd(), newRootDirCmd(), newVersionCmd())
 	return root
 }
 
@@ -415,6 +415,24 @@ func newDumpCmd() *cobra.Command {
 	c.Flags().BoolVar(&compdb, "compdb", false, "dump the compilation database (compile_commands.json)")
 	c.Flags().StringVar(&toFile, "to-file", "", "write to this file (default: stdout)")
 	c.Flags().StringVarP(&profile, "profile", "p", "release", "build profile: release|debug")
+	c.FParseErrWhitelist.UnknownFlags = true
+	return c
+}
+
+func newRootDirCmd() *cobra.Command {
+	c := &cobra.Command{
+		Use:   "root",
+		Short: "Print the workspace root directory (the dir containing BLADE_ROOT)",
+		Args:  cobra.NoArgs,
+		RunE: func(cmd *cobra.Command, args []string) error {
+			root, err := workspaceRoot()
+			if err != nil {
+				return err
+			}
+			fmt.Println(root)
+			return nil
+		},
+	}
 	c.FParseErrWhitelist.UnknownFlags = true
 	return c
 }
