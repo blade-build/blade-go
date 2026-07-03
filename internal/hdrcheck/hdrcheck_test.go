@@ -47,14 +47,14 @@ func TestCheckClassifiesInclusions(t *testing.T) {
 	libA.Deps = []*graph.Node{libB} // A declares only B
 
 	closure := fakeClosure{
-		"build64_release/a/a.objs/a.cc.o": set(
+		"build_release/a/a.objs/a.cc.o": set(
 			"a/a.cc", "a/a.h", "b/b.h", "d/d.h", "c/c_priv.h", "u/u.h",
 			"/usr/include/c++/v1/vector", // system: absolute, spelling "vector" won't match
 		),
 	}
 
 	issues := Check([]*graph.Node{libA, libB, libC, libD}, Options{
-		Root: root, BuildDir: "build64_release", ObjSuffix: ".o",
+		Root: root, BuildDir: "build_release", ObjSuffix: ".o",
 		Severity: Warn, Closure: closure,
 		Only: map[string]bool{"//a:a": true},
 	})
@@ -101,9 +101,9 @@ func TestCheckResolvesSameDirInclude(t *testing.T) {
 	libHelper := ccLib("a", "helper", map[string]any{"hdrs": []any{"helper.h"}})
 	libA := ccLib("a", "a", map[string]any{"srcs": []any{"a.cc"}}) // no deps -> missing
 
-	closure := fakeClosure{"build64_release/a/a.objs/a.cc.o": set("a/a.cc", "a/helper.h")}
+	closure := fakeClosure{"build_release/a/a.objs/a.cc.o": set("a/a.cc", "a/helper.h")}
 	issues := Check([]*graph.Node{libA, libHelper}, Options{
-		Root: root, BuildDir: "build64_release", ObjSuffix: ".o", Severity: Warn,
+		Root: root, BuildDir: "build_release", ObjSuffix: ".o", Severity: Warn,
 		Closure: closure, Only: map[string]bool{"//a:a": true},
 	})
 	if len(issues) != 1 || issues[0].Header != "a/helper.h" || issues[0].Kind != MissingDep {
@@ -116,8 +116,8 @@ func TestAllowUndeclared(t *testing.T) {
 	root := t.TempDir()
 	writeFile(t, filepath.Join(root, "a", "a.cc"), "#include \"vendor/x.h\"\n")
 	libA := ccLib("a", "a", map[string]any{"srcs": []any{"a.cc"}})
-	closure := fakeClosure{"build64_release/a/a.objs/a.cc.o": set("a/a.cc", "vendor/x.h")}
-	opt := Options{Root: root, BuildDir: "build64_release", ObjSuffix: ".o", Severity: Warn,
+	closure := fakeClosure{"build_release/a/a.objs/a.cc.o": set("a/a.cc", "vendor/x.h")}
+	opt := Options{Root: root, BuildDir: "build_release", ObjSuffix: ".o", Severity: Warn,
 		Closure: closure, Only: map[string]bool{"//a:a": true}}
 
 	if got := Check([]*graph.Node{libA}, opt); len(got) != 1 {
@@ -145,22 +145,22 @@ func TestFormatGCC(t *testing.T) {
 
 func TestParseNinjaDeps(t *testing.T) {
 	out := "" +
-		"build64_release/a/a.objs/a.cc.o: #deps 3, deps mtime 123 (VALID)\n" +
+		"build_release/a/a.objs/a.cc.o: #deps 3, deps mtime 123 (VALID)\n" +
 		"    a/a.cc\n" +
 		"    a/a.h\n" +
 		"    /usr/include/vector\n" +
 		"\n" +
-		"build64_release/b/b.objs/b.cc.o: #deps 1, deps mtime 456 (VALID)\n" +
+		"build_release/b/b.objs/b.cc.o: #deps 1, deps mtime 456 (VALID)\n" +
 		"    b/b.cc\n"
 	n := &NinjaDepsClosure{}
 	n.m = map[string]map[string]bool{}
 	// Exercise the parser directly by feeding a preset (load() shells out to ninja).
 	parseInto(n.m, out)
-	c := n.m["build64_release/a/a.objs/a.cc.o"]
+	c := n.m["build_release/a/a.objs/a.cc.o"]
 	if !c["a/a.h"] || !c["/usr/include/vector"] || len(c) != 3 {
 		t.Fatalf("bad closure a: %v", c)
 	}
-	if !n.m["build64_release/b/b.objs/b.cc.o"]["b/b.cc"] {
+	if !n.m["build_release/b/b.objs/b.cc.o"]["b/b.cc"] {
 		t.Fatalf("bad closure b")
 	}
 }

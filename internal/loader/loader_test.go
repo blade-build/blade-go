@@ -317,7 +317,7 @@ pkg_build(name = 'jsoncpp_build')
 	if !strings.Contains(cmd, "my-cc @ ") {
 		t.Errorf("cc_toolchain.tool('cc') not resolved from env: cmd=%q", cmd)
 	}
-	if !strings.Contains(cmd, "build64_release/thirdparty/jsoncpp") {
+	if !strings.Contains(cmd, "build_release/thirdparty/jsoncpp") {
 		t.Errorf("current_target_dir should reflect the calling package: cmd=%q", cmd)
 	}
 }

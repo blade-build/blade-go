@@ -21,10 +21,10 @@ func TestParse(t *testing.T) {
 rule cxx
   command = ${cxx} -c ${in} -o ${out}
 
-build build64_release/base/a.cc.o: cxx base/a.cc | build64_release/pb/msg.pb.h
+build build_release/base/a.cc.o: cxx base/a.cc | build_release/pb/msg.pb.h
   includes = -I.
-build build64_release/base/libbase.a: ar build64_release/base/a.cc.o
-build build64_release/app/app: link build64_release/app/main.cc.o | build64_release/base/libbase.a
+build build_release/base/libbase.a: ar build_release/base/a.cc.o
+build build_release/app/app: link build_release/app/main.cc.o | build_release/base/libbase.a
   libs = -lpthread
 `
 	edges := Parse(src)
@@ -35,7 +35,7 @@ build build64_release/app/app: link build64_release/app/main.cc.o | build64_rele
 	if edges[0].Rule != "cxx" || len(edges[0].Inputs) != 1 || edges[0].Inputs[0] != "base/a.cc" {
 		t.Errorf("compile edge wrong: %+v", edges[0])
 	}
-	if len(edges[0].Implicit) != 1 || edges[0].Implicit[0] != "build64_release/pb/msg.pb.h" {
+	if len(edges[0].Implicit) != 1 || edges[0].Implicit[0] != "build_release/pb/msg.pb.h" {
 		t.Errorf("implicit dep wrong: %+v", edges[0].Implicit)
 	}
 	if got, want := keys(CompiledSources(edges)), []string{"a.cc"}; !reflect.DeepEqual(got, want) {
