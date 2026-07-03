@@ -58,13 +58,44 @@ func pick(candidates ...string) string {
 	return first
 }
 
-// StaticLib returns the archive file name for a library target.
-func (t *Toolchain) StaticLib(name string) string { return "lib" + name + ".a" }
+// IsMSVC reports whether the toolchain uses MSVC naming/link conventions. On
+// Windows blade-go targets MSVC (no MinGW), so the OS is the discriminant --
+// mirroring Blade's cc_is('msvc'). File-naming below follows Blade's toolchain
+// properties: obj '.obj', static lib '<name>.lib' (no 'lib' prefix), exe '.exe';
+// gcc/clang use '.o', 'lib<name>.a', ”.
+func (t *Toolchain) IsMSVC() bool { return t.OS == "windows" }
 
-// ObjSuffix returns the object-file suffix.
-func (t *Toolchain) ObjSuffix() string { return ".o" }
+// ObjSuffix returns the object-file suffix ('.o' / '.obj').
+func (t *Toolchain) ObjSuffix() string {
+	if t.IsMSVC() {
+		return ".obj"
+	}
+	return ".o"
+}
 
-// BinName returns the executable file name for a binary target.
+// StaticLib returns the archive file name for a library target
+// ('lib<name>.a' / '<name>.lib').
+func (t *Toolchain) StaticLib(name string) string {
+	if t.IsMSVC() {
+		return name + ".lib"
+	}
+	return "lib" + name + ".a"
+}
+
+// DynamicLib returns the shared-library file name for a target
+// ('lib<name>.so' / 'lib<name>.dylib' / '<name>.dll').
+func (t *Toolchain) DynamicLib(name string) string {
+	switch t.OS {
+	case "windows":
+		return name + ".dll"
+	case "darwin":
+		return "lib" + name + ".dylib"
+	default:
+		return "lib" + name + ".so"
+	}
+}
+
+// BinName returns the executable file name for a binary target (” / '.exe').
 func (t *Toolchain) BinName(name string) string {
 	if t.OS == "windows" {
 		return name + ".exe"

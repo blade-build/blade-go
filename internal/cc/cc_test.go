@@ -38,17 +38,23 @@ func TestGenerateStructure(t *testing.T) {
 		"app/BUILD":  `cc_binary(name = 'app', srcs = ['main.cc'], deps = ['//base:base'])`,
 	}, "//app:app")
 
-	gen := New(toolchain.Detect())
+	tc := toolchain.Detect()
+	gen := New(tc)
 	f, err := gen.Generate(g)
 	if err != nil {
 		t.Fatal(err)
 	}
 	out := f.String()
+	// Derive expected file names from the toolchain so the assertions hold under
+	// MSVC naming on Windows (base.cc.obj / base.lib / app.exe) too.
+	o := tc.ObjSuffix()
+	baseLib := tc.StaticLib("base")
+	appBin := tc.BinName("app")
 	wants := []string{
-		"build build_release/base/base.objs/base.cc.o: cxx base/base.cc",
-		"build build_release/base/libbase.a: ar build_release/base/base.objs/base.cc.o",
-		"build build_release/app/app: link build_release/app/app.objs/main.cc.o | build_release/base/libbase.a",
-		"libbase.a", // the archive on the link line (in the libs var)
+		"build build_release/base/base.objs/base.cc" + o + ": cxx base/base.cc",
+		"build build_release/base/" + baseLib + ": ar build_release/base/base.objs/base.cc" + o,
+		"build build_release/app/" + appBin + ": link build_release/app/app.objs/main.cc" + o + " | build_release/base/" + baseLib,
+		baseLib,     // the archive on the link line (in the libs var)
 		"-lpthread", // transitive syslib
 	}
 	for _, w := range wants {
@@ -110,15 +116,17 @@ func TestGenerateProtoStructure(t *testing.T) {
 		"app/BUILD": `cc_binary(name = 'app', srcs = ['main.cc'], deps = ['//pb:msg'])`,
 	}, "//app:app")
 
-	f, err := New(toolchain.Detect()).Generate(g)
+	tc := toolchain.Detect()
+	f, err := New(tc).Generate(g)
 	if err != nil {
 		t.Fatal(err)
 	}
 	out := f.String()
+	o := tc.ObjSuffix()
 	wants := []string{
 		"build build_release/pb/msg.pb.cc build_release/pb/msg.pb.h: protoc pb/msg.proto",
-		"build build_release/pb/msg.pb.cc.o: cxx build_release/pb/msg.pb.cc | build_release/pb/msg.pb.h",
-		"build build_release/pb/libmsg.a: ar build_release/pb/msg.pb.cc.o",
+		"build build_release/pb/msg.pb.cc" + o + ": cxx build_release/pb/msg.pb.cc | build_release/pb/msg.pb.h",
+		"build build_release/pb/" + tc.StaticLib("msg") + ": ar build_release/pb/msg.pb.cc" + o,
 		"build_release/pb/msg.pb.h", // consumer compile gets the generated header as an implicit dep
 		"-lprotobuf",                // proto pulls in the protobuf runtime for the link
 	}
@@ -128,7 +136,7 @@ func TestGenerateProtoStructure(t *testing.T) {
 		}
 	}
 	// The consumer's own compile lists the generated header as an implicit dep.
-	if !strings.Contains(out, "build build_release/app/app.objs/main.cc.o: cxx app/main.cc | build_release/pb/msg.pb.h") {
+	if !strings.Contains(out, "build build_release/app/app.objs/main.cc"+o+": cxx app/main.cc | build_release/pb/msg.pb.h") {
 		t.Errorf("consumer compile missing generated-header implicit dep\n%s", out)
 	}
 }
@@ -214,7 +222,8 @@ gen_rule(name = 'mk', srcs = ['in.tmpl'], outs = ['out.cc'], cmd = 'cp $SRCS $OU
 cc_library(name = 'lib', srcs = ['out.cc'], deps = [':mk'])
 `,
 	}, "//g:lib")
-	f, err := New(toolchain.Detect()).Generate(g)
+	tc := toolchain.Detect()
+	f, err := New(tc).Generate(g)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -223,7 +232,7 @@ cc_library(name = 'lib', srcs = ['out.cc'], deps = [':mk'])
 		"build build_release/g/out.cc: gen g/in.tmpl",
 		"cmd = cp g/in.tmpl build_release/g/out.cc", // $SRCS/$OUTS substituted
 		// the consumer compiles the generated source from its build-dir path:
-		"build build_release/g/lib.objs/out.cc.o: cxx build_release/g/out.cc",
+		"build build_release/g/lib.objs/out.cc" + tc.ObjSuffix() + ": cxx build_release/g/out.cc",
 	}
 	for _, w := range wants {
 		if !strings.Contains(out, w) {
@@ -471,15 +480,16 @@ func TestHeaderOnlyLibraryNoArchive(t *testing.T) {
 		"h/BUILD":   `cc_library(name = 'h', hdrs = ['h.h'], visibility = ['PUBLIC'])`,
 		"app/BUILD": `cc_binary(name = 'app', srcs = ['main.cc'], deps = ['//h:h'])`,
 	}, "//app:app")
-	f, err := New(toolchain.Detect()).Generate(g)
+	tc := toolchain.Detect()
+	f, err := New(tc).Generate(g)
 	if err != nil {
 		t.Fatal(err)
 	}
 	out := f.String()
-	if strings.Contains(out, "libh.a") {
+	if strings.Contains(out, tc.StaticLib("h")) {
 		t.Errorf("header-only library should produce no archive:\n%s", out)
 	}
-	if !strings.Contains(out, "build build_release/app/app: link") {
+	if !strings.Contains(out, "build build_release/app/"+tc.BinName("app")+": link") {
 		t.Errorf("consumer link edge missing:\n%s", out)
 	}
 }
