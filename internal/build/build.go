@@ -238,6 +238,24 @@ type Options struct {
 	NinjaArgs []string // extra ninja flags (e.g. -j N, -k 0, -n) from the CLI
 	FullTest  bool     // re-run every test, ignoring the incremental cache
 	TestJobs  int      // parallel test workers (0 = CPUs available to the process, cgroup-aware)
+	Profile   string   // "release" (default) or "debug"; selects build64_<profile> + flags
+}
+
+// buildDirFor is the output directory for a profile: build64_release / build64_debug.
+// An empty or unknown profile falls back to release.
+func buildDirFor(profile string) string {
+	if profile == "debug" {
+		return "build64_debug"
+	}
+	return "build64_release"
+}
+
+// normProfile normalizes a profile string, defaulting to release.
+func normProfile(profile string) string {
+	if profile == "debug" {
+		return "debug"
+	}
+	return "release"
 }
 
 // timing reports per-phase front-end durations to stderr when BLADE_TIMING is
@@ -277,8 +295,9 @@ func (t *timing) report(nodes int) {
 // loadGraph loads BLADE_ROOT config and resolves the dependency graph for the
 // given target patterns (no ninja generation, no vcpkg install). Shared by plan
 // (which then generates) and Query (which only inspects the graph).
-func loadGraph(root string, targets []string) (*loader.Loader, *graph.Graph, []string, error) {
+func loadGraph(root string, targets []string, profile string) (*loader.Loader, *graph.Graph, []string, error) {
 	l := loader.New(root)
+	l.BuildDir = buildDirFor(profile) // the build-dir mirror must match the profile's output tree
 	bladeRoot := filepath.Join(root, "BLADE_ROOT")
 	if _, err := os.Stat(bladeRoot); err == nil {
 		if err := l.LoadConfigFile(bladeRoot); err != nil {
@@ -299,14 +318,16 @@ func loadGraph(root string, targets []string) (*loader.Loader, *graph.Graph, []s
 
 // plan loads the workspace and produces the graph, generator, and ninja file for
 // the given targets (patterns are expanded to concrete labels, also returned).
-func plan(root string, targets []string) (*graph.Graph, *cc.Generator, *ninja.File, []string, error) {
+func plan(root string, targets []string, profile string) (*graph.Graph, *cc.Generator, *ninja.File, []string, error) {
 	tm := newTiming()
-	l, g, expanded, err := loadGraph(root, targets)
+	l, g, expanded, err := loadGraph(root, targets, profile)
 	if err != nil {
 		return nil, nil, nil, nil, err
 	}
 	tm.mark("load+graph")
 	gen := cc.New(toolchain.Detect())
+	gen.BuildDir = buildDirFor(profile)
+	gen.Profile = normProfile(profile)
 	if exe, err := os.Executable(); err == nil {
 		gen.Self = exe // resource_library codegen re-invokes this binary
 	}
@@ -350,7 +371,7 @@ func runNinja(root, buildFile string, extraArgs ...string) error {
 // Build loads the workspace, generates the ninja file for the given targets, and
 // (optionally) runs ninja. It returns the path of the generated ninja file.
 func Build(root string, targets []string, opt Options) (string, error) {
-	_, gen, f, _, err := plan(root, targets)
+	_, gen, f, _, err := plan(root, targets, opt.Profile)
 	if err != nil {
 		return "", err
 	}
@@ -374,8 +395,8 @@ func Build(root string, targets []string, opt Options) (string, error) {
 // cc_config.hdr_dep_missing_severity (Blade parity), else Warn. Returns the
 // sorted issues and the effective severity so the caller can report and decide
 // whether to fail.
-func CheckHdrs(root string, targets []string, override string) ([]hdrcheck.Issue, hdrcheck.Severity, error) {
-	l, g, expanded, err := loadGraph(root, targets)
+func CheckHdrs(root string, targets []string, override, profile string) ([]hdrcheck.Issue, hdrcheck.Severity, error) {
+	l, g, expanded, err := loadGraph(root, targets, profile)
 	if err != nil {
 		return nil, hdrcheck.Off, err
 	}
@@ -401,7 +422,7 @@ func CheckHdrs(root string, targets []string, override string) ([]hdrcheck.Issue
 	tc := toolchain.Detect()
 	issues := hdrcheck.Check(g.All(), hdrcheck.Options{
 		Root:      root,
-		BuildDir:  cc.New(tc).BuildDir,
+		BuildDir:  buildDirFor(profile),
 		ObjSuffix: tc.ObjSuffix(),
 		Severity:  sev,
 		Only:      only,
@@ -450,7 +471,7 @@ type TestResult struct {
 // opt.FullTest. (Environment variables are deliberately not part of the
 // fingerprint -- blade-go doesn't set test env yet; revisit if it ever does.)
 func Test(root string, targets []string, opt Options, onResult func(TestResult)) ([]TestResult, error) {
-	g, gen, f, expanded, err := plan(root, targets)
+	g, gen, f, expanded, err := plan(root, targets, opt.Profile)
 	if err != nil {
 		return nil, err
 	}
@@ -462,7 +483,7 @@ func Test(root string, targets []string, opt Options, onResult func(TestResult))
 	// run -- one target that won't compile shouldn't hide the rest of a sweep.
 	// (Errors are surfaced; a test whose binary is missing is reported failed.)
 	runNinja(root, buildFile, append([]string{"-k", "0"}, opt.NinjaArgs...)...)
-	hist := loadTestHistory(root)
+	hist := loadTestHistory(root, gen.BuildDir)
 
 	// Split into the normal tests (run concurrently) and the exclusive ones
 	// (`exclusive = True`: CPU-heavy / timing-sensitive -- run serially and never
@@ -544,7 +565,7 @@ func Test(root string, targets []string, opt Options, onResult func(TestResult))
 		runOne(node)
 	}
 
-	saveTestHistory(root, hist)
+	saveTestHistory(root, gen.BuildDir, hist)
 	return results, nil
 }
 
@@ -557,21 +578,21 @@ type testRecord struct {
 
 type testHistory map[string]testRecord
 
-func testHistoryPath(root string) string {
-	return filepath.Join(root, cc.New(toolchain.Detect()).BuildDir, ".blade-go-test-history.json")
+func testHistoryPath(root, buildDir string) string {
+	return filepath.Join(root, buildDir, ".blade-go-test-history.json")
 }
 
-func loadTestHistory(root string) testHistory {
+func loadTestHistory(root, buildDir string) testHistory {
 	h := testHistory{}
-	if b, err := os.ReadFile(testHistoryPath(root)); err == nil {
+	if b, err := os.ReadFile(testHistoryPath(root, buildDir)); err == nil {
 		_ = json.Unmarshal(b, &h)
 	}
 	return h
 }
 
-func saveTestHistory(root string, h testHistory) {
+func saveTestHistory(root, buildDir string, h testHistory) {
 	if b, err := json.MarshalIndent(h, "", "  "); err == nil {
-		_ = os.WriteFile(testHistoryPath(root), b, 0o644)
+		_ = os.WriteFile(testHistoryPath(root, buildDir), b, 0o644)
 	}
 }
 
@@ -600,7 +621,7 @@ func testFingerprint(root, binRel string, n *graph.Node) string {
 // Run builds a single runnable target (cc_binary or cc_test) and executes it,
 // forwarding args and the current stdio; it returns the program's exit code.
 func Run(root, target string, args []string, opt Options) (int, error) {
-	g, gen, f, _, err := plan(root, []string{target})
+	g, gen, f, _, err := plan(root, []string{target}, opt.Profile)
 	if err != nil {
 		return 1, err
 	}
@@ -718,12 +739,11 @@ func testdataEntries(root string, n *graph.Node) []testdataEntry {
 // The ninja graph is regenerated for the requested targets so `ninja -t clean`
 // removes exactly their outputs. If nothing has been built yet (no build dir),
 // it is a no-op.
-func Clean(root string, targets []string) error {
-	buildDir := cc.New(toolchain.Detect()).BuildDir
-	if _, err := os.Stat(filepath.Join(root, buildDir)); os.IsNotExist(err) {
+func Clean(root string, targets []string, profile string) error {
+	if _, err := os.Stat(filepath.Join(root, buildDirFor(profile))); os.IsNotExist(err) {
 		return nil // nothing built, nothing to clean
 	}
-	_, gen, f, _, err := plan(root, targets)
+	_, gen, f, _, err := plan(root, targets, profile)
 	if err != nil {
 		return err
 	}
@@ -744,7 +764,7 @@ type QueryResult struct {
 // its transitive dependencies (dependents=false) or transitive dependents
 // (dependents=true, the reverse closure).
 func Query(root string, targets []string, dependents bool) ([]QueryResult, error) {
-	_, g, _, err := loadGraph(root, []string{"//..."})
+	_, g, _, err := loadGraph(root, []string{"//..."}, "release") // deps are profile-independent
 	if err != nil {
 		return nil, err
 	}
