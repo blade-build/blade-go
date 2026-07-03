@@ -129,7 +129,7 @@ blade test -k //flare/base/...                      # run every cc_test (paralle
 blade test --test-jobs 4 //flare/...                # cap test parallelism (default = CPUs)
 blade test --full-test //flare/base/...             # force re-run, ignoring the cache
 blade run //flare/example/rpc:server -- --port 80   # build + run; args after -- go to it
-blade clean                                         # remove the build output dir
+blade clean //flare/base/...                        # ninja -t clean those targets (keeps vcpkg tree)
 blade query --deps //flare/base:logging             # transitive deps (--dependents for reverse)
 blade build --hdr-check=error //flare/rpc:rpc        # fail on undeclared header deps
 ```

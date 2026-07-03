@@ -629,16 +629,12 @@ func TestBuildDefines(t *testing.T) {
 }
 
 func TestClean(t *testing.T) {
+	// With no build dir, clean is a no-op (does not error and does not plan).
+	// The actual `ninja -t clean` path needs a real build + ninja and is
+	// integration-verified on flare rather than here.
 	root := t.TempDir()
-	bd := filepath.Join(root, "build64_release")
-	if err := os.MkdirAll(filepath.Join(bd, "x"), 0o755); err != nil {
-		t.Fatal(err)
-	}
-	if err := Clean(root); err != nil {
-		t.Fatal(err)
-	}
-	if _, err := os.Stat(bd); !os.IsNotExist(err) {
-		t.Errorf("build dir still present after clean: %v", err)
+	if err := Clean(root, []string{"//..."}); err != nil {
+		t.Fatalf("clean with no build dir should be a no-op, got %v", err)
 	}
 }
 

@@ -709,8 +709,29 @@ func testdataEntries(root string, n *graph.Node) []testdataEntry {
 }
 
 // Clean removes the build output directory.
-func Clean(root string) error {
-	return os.RemoveAll(filepath.Join(root, cc.New(toolchain.Detect()).BuildDir))
+// Clean removes the build outputs of the requested targets (their closure) via
+// `ninja -t clean`, leaving the ninja file and -- crucially -- the vcpkg tree in
+// place, so a subsequent build doesn't re-provision thirdparty deps. This mirrors
+// Python Blade's clean (per-target output removal), not a `rm -rf` of the whole
+// build dir. targets accepts the same patterns as build (e.g. //... for all).
+//
+// The ninja graph is regenerated for the requested targets so `ninja -t clean`
+// removes exactly their outputs. If nothing has been built yet (no build dir),
+// it is a no-op.
+func Clean(root string, targets []string) error {
+	buildDir := cc.New(toolchain.Detect()).BuildDir
+	if _, err := os.Stat(filepath.Join(root, buildDir)); os.IsNotExist(err) {
+		return nil // nothing built, nothing to clean
+	}
+	_, gen, f, _, err := plan(root, targets)
+	if err != nil {
+		return err
+	}
+	buildFile, err := writeNinja(root, gen, f)
+	if err != nil {
+		return err
+	}
+	return runNinja(root, buildFile, "-t", "clean")
 }
 
 // QueryResult is one queried target and its related targets (sorted).
