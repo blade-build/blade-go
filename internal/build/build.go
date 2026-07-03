@@ -20,6 +20,7 @@ import (
 
 	"github.com/blade-build/blade-go/internal/bladectx"
 	"github.com/blade-build/blade-go/internal/cc"
+	"github.com/blade-build/blade-go/internal/ccundef"
 	"github.com/blade-build/blade-go/internal/config"
 	"github.com/blade-build/blade-go/internal/graph"
 	"github.com/blade-build/blade-go/internal/hdrcheck"
@@ -340,12 +341,12 @@ func loadGraph(root string, targets []string, buildDir string) (*loader.Loader, 
 
 // plan loads the workspace and produces the graph, generator, and ninja file for
 // the given targets (patterns are expanded to concrete labels, also returned).
-func plan(root string, targets []string, profile, debugInfo string, sanitizers []string, coverage bool) (*graph.Graph, *cc.Generator, *ninja.File, []string, error) {
+func plan(root string, targets []string, profile, debugInfo string, sanitizers []string, coverage bool) (*graph.Graph, *cc.Generator, *ninja.File, []string, *loader.Loader, error) {
 	tm := newTiming()
 	buildDir := buildDirFor(profile, sanitizers, coverage)
 	l, g, expanded, err := loadGraph(root, targets, buildDir)
 	if err != nil {
-		return nil, nil, nil, nil, err
+		return nil, nil, nil, nil, nil, err
 	}
 	tm.mark("load+graph")
 	gen := cc.New(toolchain.Detect())
@@ -382,9 +383,9 @@ func plan(root string, targets []string, profile, debugInfo string, sanitizers [
 	tm.mark("generate")
 	tm.report(g.Len())
 	if err != nil {
-		return nil, nil, nil, nil, err
+		return nil, nil, nil, nil, nil, err
 	}
-	return g, gen, f, expanded, nil
+	return g, gen, f, expanded, l, nil
 }
 
 func writeNinja(root string, gen *cc.Generator, f *ninja.File) (string, error) {
@@ -413,7 +414,7 @@ func runNinja(root, buildFile string, extraArgs ...string) error {
 // Build loads the workspace, generates the ninja file for the given targets, and
 // (optionally) runs ninja. It returns the path of the generated ninja file.
 func Build(root string, targets []string, opt Options) (string, error) {
-	_, gen, f, _, err := plan(root, targets, opt.Profile, opt.DebugInfo, opt.Sanitizers, opt.Coverage)
+	_, gen, f, _, _, err := plan(root, targets, opt.Profile, opt.DebugInfo, opt.Sanitizers, opt.Coverage)
 	if err != nil {
 		return "", err
 	}
@@ -503,6 +504,113 @@ func CheckHdrs(root string, targets []string, override, profile string, sanitize
 	return issues, nil
 }
 
+// CheckUndefined runs the static undefined-symbol check over the requested
+// cc_library targets (their archives must already be built): every undefined
+// external symbol must be resolvable from the library's own archive, a declared
+// dep's archive, the system libraries, or an allow/baseline regex. `override` is
+// "true" (--cc-check-undefined), "false" (--no-cc-check-undefined), or "" (use
+// cc_library_config). Returns the issues (sorted); caller reports + decides fail.
+func CheckUndefined(root string, targets []string, override, profile string, sanitizers []string, coverage bool) ([]ccundef.Issue, error) {
+	g, gen, _, expanded, l, err := plan(root, targets, profile, "", sanitizers, coverage)
+	if err != nil {
+		return nil, err
+	}
+	// Enabled = cc_library_config.check_undefined (default true), overridable.
+	enabled := true
+	if v, ok := l.Config.GetItem("cc_library_config", "check_undefined"); ok {
+		if b, ok := v.(bool); ok {
+			enabled = b
+		}
+	}
+	switch override {
+	case "true":
+		enabled = true
+	case "false":
+		enabled = false
+	}
+	if !enabled {
+		return nil, nil
+	}
+	sev := ccundef.Warn // cc_library_config default severity is 'warning'
+	if v, ok := l.Config.GetItem("cc_library_config", "check_undefined_severity"); ok {
+		if s, ok := v.(string); ok {
+			sev = ccundef.SeverityFromBlade(s)
+		}
+	}
+	if override == "true" && sev == ccundef.Off {
+		sev = ccundef.Warn // forced on: don't let a 'debug' config silence it
+	}
+	if sev == ccundef.Off {
+		return nil, nil
+	}
+
+	tc := toolchain.Detect()
+	system := ccundef.SystemSymbols(tc.CC, tc.OS, "nm")
+	blade := bladectx.BuildModule("", gen.BuildDir, l.Config)
+	allowGlobal := evalConfigList(l.Config, "cc_library_config", "allow_undefined", blade)
+
+	only := make(map[string]bool, len(expanded))
+	for _, lbl := range expanded {
+		only[lbl] = true
+	}
+	abs := func(p string) string {
+		if filepath.IsAbs(p) {
+			return p
+		}
+		return filepath.Join(root, p)
+	}
+	definedCache := map[string]map[string]bool{}
+	getDefined := func(archive string) map[string]bool {
+		if d, ok := definedCache[archive]; ok {
+			return d
+		}
+		_, d := ccundef.NmExternals("nm", abs(archive))
+		definedCache[archive] = d
+		return d
+	}
+
+	var issues []ccundef.Issue
+	for _, n := range g.All() {
+		if n.Target.Type != "cc_library" || !only[n.Label()] {
+			continue
+		}
+		// Per-target allow_undefined: a bare True exempts the whole target; a list
+		// adds patterns on top of the global allowlist.
+		if b, ok := n.Target.Attrs["allow_undefined"].(bool); ok && b {
+			continue
+		}
+		allow := append(append([]string{}, allowGlobal...), n.Target.AttrStrings("allow_undefined")...)
+		own, deps := gen.LinkArchives(n)
+		if own == "" {
+			continue // header-only / no archive
+		}
+		undef, ownDef := ccundef.NmExternals("nm", abs(own))
+		depDefined := map[string]bool{}
+		for _, d := range deps {
+			for s := range getDefined(d) {
+				depDefined[s] = true
+			}
+		}
+		unresolved := ccundef.Unresolved(undef, ownDef, depDefined, system, ccundef.CompileAllow(allow))
+		if len(unresolved) > 0 {
+			sort.Strings(unresolved)
+			issues = append(issues, ccundef.Issue{
+				Target: n.Label(), TargetPos: relTo(root, n.Target.Pos), Symbols: unresolved, Sev: sev,
+			})
+		}
+	}
+	sort.Slice(issues, func(i, j int) bool { return issues[i].Target < issues[j].Target })
+	return issues, nil
+}
+
+// relTo strips a leading root prefix for a workspace-relative, clickable path.
+func relTo(root, loc string) string {
+	if root != "" && strings.HasPrefix(loc, root+"/") {
+		return loc[len(root)+1:]
+	}
+	return loc
+}
+
 // DefaultJobs is the default parallelism for both building and testing when the
 // user gives no explicit count: the number of CPUs effectively available to this
 // process. runtime.GOMAXPROCS(0) is used rather than runtime.NumCPU() because on
@@ -531,7 +639,7 @@ func DefaultJobs() int {
 // itself (`ninja -t compdb`) to emit the JSON for the compile rules -- reusing
 // the exact commands ninja would run, so the database always matches the build.
 func CompileDB(root string, targets []string, profile string, sanitizers []string, coverage bool) ([]byte, error) {
-	_, gen, f, _, err := plan(root, targets, profile, "", sanitizers, coverage)
+	_, gen, f, _, _, err := plan(root, targets, profile, "", sanitizers, coverage)
 	if err != nil {
 		return nil, err
 	}
@@ -658,7 +766,7 @@ type TestResult struct {
 // opt.FullTest. (Environment variables are deliberately not part of the
 // fingerprint -- blade-go doesn't set test env yet; revisit if it ever does.)
 func Test(root string, targets []string, opt Options, onResult func(TestResult)) ([]TestResult, error) {
-	g, gen, f, expanded, err := plan(root, targets, opt.Profile, opt.DebugInfo, opt.Sanitizers, opt.Coverage)
+	g, gen, f, expanded, _, err := plan(root, targets, opt.Profile, opt.DebugInfo, opt.Sanitizers, opt.Coverage)
 	if err != nil {
 		return nil, err
 	}
@@ -820,7 +928,7 @@ func testFingerprint(root, binRel string, n *graph.Node) string {
 // Run builds a single runnable target (cc_binary or cc_test) and executes it,
 // forwarding args and the current stdio; it returns the program's exit code.
 func Run(root, target string, args []string, opt Options) (int, error) {
-	g, gen, f, _, err := plan(root, []string{target}, opt.Profile, opt.DebugInfo, opt.Sanitizers, opt.Coverage)
+	g, gen, f, _, _, err := plan(root, []string{target}, opt.Profile, opt.DebugInfo, opt.Sanitizers, opt.Coverage)
 	if err != nil {
 		return 1, err
 	}
@@ -942,7 +1050,7 @@ func Clean(root string, targets []string, profile string, sanitizers []string, c
 	if _, err := os.Stat(filepath.Join(root, buildDirFor(profile, sanitizers, coverage))); os.IsNotExist(err) {
 		return nil // nothing built, nothing to clean
 	}
-	_, gen, f, _, err := plan(root, targets, profile, "", sanitizers, coverage)
+	_, gen, f, _, _, err := plan(root, targets, profile, "", sanitizers, coverage)
 	if err != nil {
 		return err
 	}

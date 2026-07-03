@@ -44,6 +44,7 @@ type Generator struct {
 	BenchmarkSyslibs []string         // cc_config benchmark libs that are #-syslibs
 
 	foreignIncs map[*graph.Node][]string // include dirs exported by foreign_cc_library nodes
+	libOf       map[*graph.Node]string   // node -> its archive path (populated by Generate; for LinkArchives)
 
 	// ForceLoadPorts are vcpkg ports whose whole archive must be linked
 	// (vcpkg_config link_all_symbols: gflags/glog/yaml-cpp).
@@ -247,7 +248,30 @@ func (gen *Generator) Generate(g *graph.Graph) (*ninja.File, error) {
 			})
 		}
 	}
+	gen.libOf = libOf // expose archive paths for LinkArchives (undefined-symbol check)
 	return f, nil
+}
+
+// LinkArchives returns the on-disk archive paths whose symbols are available to
+// node n at link time: n's own archive and every transitive cc-family dep's
+// archive + vcpkg archive. Raw paths (no -Wl,-force_load / -l wrapping). Used by
+// the undefined-symbol check. Call after Generate.
+func (gen *Generator) LinkArchives(n *graph.Node) (own string, deps []string) {
+	own = gen.libOf[n]
+	_, implicit := gen.transitiveLibs(n, gen.libOf) // raw dep archive paths
+	deps = append(deps, implicit...)
+	vcpkgs := gen.transitiveVcpkgs(n)
+	// A proto in the closure pulls in the protobuf runtime archive, added the
+	// same way the link edge does (not a regular transitive vcpkg dep).
+	if gen.hasProtoInClosure(n) {
+		vcpkgs = append(vcpkgs, gen.ProtobufVcpkgs...)
+	}
+	for _, v := range vcpkgs {
+		if arg := gen.Vcpkg.LibArg(v.Lib); arg != "" && !strings.HasPrefix(arg, "-") {
+			deps = append(deps, arg)
+		}
+	}
+	return own, deps
 }
 
 func (gen *Generator) emitRules(f *ninja.File) {
