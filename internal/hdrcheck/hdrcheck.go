@@ -100,7 +100,7 @@ type ClosureSource interface {
 // Options configures a check run.
 type Options struct {
 	Root       string          // workspace root (abs)
-	BuildDir   string          // e.g. "build64_release"
+	BuildDir   string          // e.g. "build_release"
 	ObjSuffix  string          // e.g. ".o"
 	Severity   Severity        // Off skips entirely
 	Closure    ClosureSource   // nil => NinjaDepsClosure over BuildDir/build.ninja
@@ -395,7 +395,7 @@ func isHeader(name string) bool {
 // binary log rather than leaving a `.d` file behind.
 type NinjaDepsClosure struct {
 	Root      string // workspace root (ninja cwd)
-	BuildFile string // ninja file, relative to Root (e.g. "build64_release/build.ninja")
+	BuildFile string // ninja file, relative to Root (e.g. "build_release/build.ninja")
 
 	once sync.Once
 	m    map[string]map[string]bool

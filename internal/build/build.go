@@ -238,16 +238,16 @@ type Options struct {
 	NinjaArgs []string // extra ninja flags (e.g. -j N, -k 0, -n) from the CLI
 	FullTest  bool     // re-run every test, ignoring the incremental cache
 	TestJobs  int      // parallel test workers (0 = CPUs available to the process, cgroup-aware)
-	Profile   string   // "release" (default) or "debug"; selects build64_<profile> + flags
+	Profile   string   // "release" (default) or "debug"; selects build_<profile> + flags
 }
 
-// buildDirFor is the output directory for a profile: build64_release / build64_debug.
+// buildDirFor is the output directory for a profile: build_release / build_debug.
 // An empty or unknown profile falls back to release.
 func buildDirFor(profile string) string {
 	if profile == "debug" {
-		return "build64_debug"
+		return "build_debug"
 	}
-	return "build64_release"
+	return "build_release"
 }
 
 // normProfile normalizes a profile string, defaulting to release.

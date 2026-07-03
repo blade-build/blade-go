@@ -65,14 +65,14 @@ func TestGetenv(t *testing.T) {
 }
 
 func TestBuildModule(t *testing.T) {
-	m := BuildModule("flare/base", "build64_release", nil)
+	m := BuildModule("flare/base", "build_release", nil)
 	if got := eval(t, m, `blade.cc_toolchain.target_os`); string(got.(starlark.String)) != HostOS() {
 		t.Errorf("cc_toolchain.target_os=%v", got)
 	}
 	if got := eval(t, m, `blade.current_source_dir()`); string(got.(starlark.String)) != "flare/base" {
 		t.Errorf("current_source_dir=%v", got)
 	}
-	if got := eval(t, m, `blade.current_target_dir()`); string(got.(starlark.String)) != "build64_release/flare/base" {
+	if got := eval(t, m, `blade.current_target_dir()`); string(got.(starlark.String)) != "build_release/flare/base" {
 		t.Errorf("current_target_dir=%v", got)
 	}
 }
@@ -142,7 +142,7 @@ func TestConfigGetItem(t *testing.T) {
 		"proto_library_config.protoc":        "MYPROTOC",
 		"proto_library_config.protobuf_libs": []any{"#protobuf", "#pthread"},
 	}
-	m := BuildModule("pkg", "build64_release", cfg)
+	m := BuildModule("pkg", "build_release", cfg)
 	if got := eval(t, m, `blade.config.get_item('proto_library_config', 'protoc')`); string(got.(starlark.String)) != "MYPROTOC" {
 		t.Errorf("get_item protoc=%v", got)
 	}

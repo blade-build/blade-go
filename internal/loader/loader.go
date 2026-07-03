@@ -61,7 +61,7 @@ var configNames = []string{
 // Loader accumulates targets and configuration across the files it loads.
 type Loader struct {
 	Root     string // workspace root (absolute)
-	BuildDir string // build output dir mirror (e.g. "build64_release")
+	BuildDir string // build output dir mirror (e.g. "build_release")
 	Targets  *target.Registry
 	Config   *config.Config
 
@@ -77,7 +77,7 @@ func New(root string) *Loader {
 	}
 	return &Loader{
 		Root:     abs,
-		BuildDir: "build64_release",
+		BuildDir: "build_release",
 		Targets:  target.NewRegistry(),
 		Config:   config.New(),
 		extCache: map[string]starlark.StringDict{},

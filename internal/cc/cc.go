@@ -16,7 +16,7 @@ import (
 // Generator turns a resolved graph into a ninja file.
 type Generator struct {
 	Tc               *toolchain.Toolchain
-	BuildDir         string           // build output dir (e.g. "build64_release")
+	BuildDir         string           // build output dir (e.g. "build_release")
 	Profile          string           // "release" or "debug" (drives optimize/NDEBUG flags)
 	Self             string           // path to the blade-go binary (resource_library codegen)
 	Protoc           string           // protoc executable (proto_library codegen)
@@ -42,7 +42,7 @@ type Generator struct {
 func New(tc *toolchain.Toolchain) *Generator {
 	return &Generator{
 		Tc:           tc,
-		BuildDir:     "build64_release",
+		BuildDir:     "build_release",
 		Profile:      "release",
 		Protoc:       "protoc",
 		ProtobufLibs: []string{"protobuf", "pthread"},

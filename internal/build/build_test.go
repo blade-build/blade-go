@@ -69,8 +69,8 @@ func TestBuildGeneratesNinja(t *testing.T) {
 	}
 	out := string(data)
 	for _, want := range []string{
-		"build build64_release/base/libbase.a: ar",
-		"build build64_release/app/app: link",
+		"build build_release/base/libbase.a: ar",
+		"build build_release/app/app: link",
 	} {
 		if !strings.Contains(out, want) {
 			t.Errorf("generated ninja missing %q\n%s", want, out)
@@ -103,7 +103,7 @@ func TestBuildRunsNinja(t *testing.T) {
 	if _, err := Build(root, []string{"//hi:hi"}, Options{RunNinja: true}); err != nil {
 		t.Fatal(err)
 	}
-	out, err := exec.Command(filepath.Join(root, "build64_release/hi/hi")).CombinedOutput()
+	out, err := exec.Command(filepath.Join(root, "build_release/hi/hi")).CombinedOutput()
 	if err != nil {
 		t.Fatalf("run: %v\n%s", err, out)
 	}
@@ -227,27 +227,27 @@ foreign_cc_library(name = 'foo', deps = [':foo_build'], visibility = ['PUBLIC'])
 	out := string(mustRead(t, ninjaFile))
 
 	// (1) chain: foo_build's stamp src resolves to the unpack's build-dir output.
-	if !strings.Contains(out, "build64_release/thirdparty/foo/foo.stamp") {
+	if !strings.Contains(out, "build_release/thirdparty/foo/foo.stamp") {
 		t.Errorf("gen_rule chain src not resolved to the dep's output:\n%s", out)
 	}
 	// (2) $OUT_DIR expanded to the target's output dir.
-	if !strings.Contains(out, "build @ build64_release/thirdparty/foo") {
+	if !strings.Contains(out, "build @ build_release/thirdparty/foo") {
 		t.Errorf("$OUT_DIR not expanded:\n%s", out)
 	}
 	// (3) consumer links the built archive.
-	if !strings.Contains(out, "build64_release/thirdparty/foo/lib/libfoo.a") {
+	if !strings.Contains(out, "build_release/thirdparty/foo/lib/libfoo.a") {
 		t.Errorf("consumer does not link the foreign archive:\n%s", out)
 	}
 	// (4) consumer gets the exported include dirs.
-	if !strings.Contains(out, "-Ibuild64_release/thirdparty ") && !strings.Contains(out, "-Ibuild64_release/thirdparty\n") {
+	if !strings.Contains(out, "-Ibuild_release/thirdparty ") && !strings.Contains(out, "-Ibuild_release/thirdparty\n") {
 		t.Errorf("consumer missing the pkg-parent include dir:\n%s", out)
 	}
-	if !strings.Contains(out, "-Ibuild64_release/thirdparty/foo/include") {
+	if !strings.Contains(out, "-Ibuild_release/thirdparty/foo/include") {
 		t.Errorf("consumer missing system_export_incs dir:\n%s", out)
 	}
 	// (5) the consumer's COMPILE waits for the foreign build (its archive is an
 	// implicit dep) so the header shims exist -- else it races and misses them.
-	if !strings.Contains(out, "app/m.cc | ") || !strings.Contains(out, "app/m.cc | build64_release/thirdparty/foo/lib/libfoo.a") {
+	if !strings.Contains(out, "app/m.cc | ") || !strings.Contains(out, "app/m.cc | build_release/thirdparty/foo/lib/libfoo.a") {
 		t.Errorf("consumer compile not ordered after the foreign build:\n%s", out)
 	}
 }
@@ -286,15 +286,15 @@ func TestBuildResourceLibrary(t *testing.T) {
 	}
 	out := string(mustRead(t, ninjaFile))
 	// index edge produces the .h and .c
-	if !strings.Contains(out, "build64_release/res/r.h build64_release/res/r.c: resource_index") {
+	if !strings.Contains(out, "build_release/res/r.h build_release/res/r.c: resource_index") {
 		t.Errorf("resource_index edge missing:\n%s", out)
 	}
 	// per-resource embed edge
-	if !strings.Contains(out, "build64_release/res/a.txt.c: resource res/a.txt") {
+	if !strings.Contains(out, "build_release/res/a.txt.c: resource res/a.txt") {
 		t.Errorf("resource embed edge missing:\n%s", out)
 	}
 	// archived and linked by the consumer
-	if !strings.Contains(out, "build64_release/res/libr.a") {
+	if !strings.Contains(out, "build_release/res/libr.a") {
 		t.Errorf("resource archive missing:\n%s", out)
 	}
 }
@@ -322,7 +322,7 @@ func TestBuildLinkAllSymbols(t *testing.T) {
 		t.Fatal(err)
 	}
 	out := string(mustRead(t, ninjaFile))
-	archive := "build64_release/reg/libreg.a"
+	archive := "build_release/reg/libreg.a"
 	// Platform-specific whole-archive wrapping around the archive.
 	if !strings.Contains(out, "-force_load,"+archive) &&
 		!strings.Contains(out, "--whole-archive "+archive) {
@@ -573,7 +573,7 @@ cc_config(
 		t.Fatal(err)
 	}
 	out := string(mustRead(t, ninjaFile))
-	if !strings.Contains(out, "-Ithirdparty/") || !strings.Contains(out, "-Ibuild64_release/thirdparty/") {
+	if !strings.Contains(out, "-Ithirdparty/") || !strings.Contains(out, "-Ibuild_release/thirdparty/") {
 		t.Errorf("extra_incs lambda with blade.workspace.build_dir not applied:\n%s", out)
 	}
 }
@@ -685,7 +685,7 @@ func TestPrepareRunDir(t *testing.T) {
 		Type: "cc_test", Name: "t", Package: "pkg/sub",
 		Attrs: map[string]any{"testdata": []any{[]any{"testdata", "conf"}}},
 	}}
-	binRel := "build64_release/pkg/sub/t"
+	binRel := "build_release/pkg/sub/t"
 	dir := prepareRunDir(root, n, binRel)
 	if want := filepath.Join(root, binRel+".runfiles"); dir != want {
 		t.Fatalf("run dir=%q, want per-test %q", dir, want)
@@ -697,37 +697,37 @@ func TestPrepareRunDir(t *testing.T) {
 	}
 	// Two tests in one package get distinct dirs (isolation).
 	n2 := &graph.Node{Target: &target.Target{Type: "cc_test", Name: "u", Package: "pkg/sub"}}
-	if d2 := prepareRunDir(root, n2, "build64_release/pkg/sub/u"); d2 == dir {
+	if d2 := prepareRunDir(root, n2, "build_release/pkg/sub/u"); d2 == dir {
 		t.Errorf("sibling tests share a run dir: %q", d2)
 	}
 }
 
 func TestTestFingerprintAndHistory(t *testing.T) {
 	root := t.TempDir()
-	bin := filepath.Join(root, "build64_release/p/t")
+	bin := filepath.Join(root, "build_release/p/t")
 	if err := os.MkdirAll(filepath.Dir(bin), 0o755); err != nil {
 		t.Fatal(err)
 	}
 	os.WriteFile(bin, []byte("v1"), 0o755)
 	n := &graph.Node{Target: &target.Target{Type: "cc_test", Name: "t", Package: "p"}}
 
-	fp1 := testFingerprint(root, "build64_release/p/t", n)
+	fp1 := testFingerprint(root, "build_release/p/t", n)
 	if fp1 == "" {
 		t.Fatal("empty fingerprint")
 	}
-	if fp1 != testFingerprint(root, "build64_release/p/t", n) {
+	if fp1 != testFingerprint(root, "build_release/p/t", n) {
 		t.Error("fingerprint not stable for unchanged inputs")
 	}
 	// Changing the binary (size/mtime) changes the fingerprint.
 	os.WriteFile(bin, []byte("v2-bigger"), 0o755)
-	if testFingerprint(root, "build64_release/p/t", n) == fp1 {
+	if testFingerprint(root, "build_release/p/t", n) == fp1 {
 		t.Error("fingerprint should change when the binary changes")
 	}
 
 	// History round-trips.
 	h := testHistory{"//p:t": {Passed: true, Fingerprint: fp1}}
-	saveTestHistory(root, "build64_release", h)
-	got := loadTestHistory(root, "build64_release")
+	saveTestHistory(root, "build_release", h)
+	got := loadTestHistory(root, "build_release")
 	if got["//p:t"].Fingerprint != fp1 || !got["//p:t"].Passed {
 		t.Errorf("history round-trip lost data: %+v", got)
 	}
