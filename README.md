@@ -133,6 +133,7 @@ blade clean //flare/base/...                        # ninja -t clean those targe
 blade query --deps //flare/base:logging             # transitive deps (--dependents for reverse)
 blade build --hdr-check=error //flare/rpc:rpc        # fail on undeclared header deps
 blade dump --compdb --to-file compile_commands.json //...  # compilation database for clangd
+blade test --sanitizer=address //flare/base/...      # AddressSanitizer build+test (build_release_asan)
 ```
 
 | flag | effect |
@@ -142,6 +143,7 @@ blade dump --compdb --to-file compile_commands.json //...  # compilation databas
 | `-n, --dry-run` | ninja `-n` |
 | `--no-build`, `--stop-after {load,analyze,generate}` | generate `build.ninja`, don't run ninja |
 | `-p, --profile {release,debug}` | build profile: release = `-O2 -DNDEBUG`, debug = `-O0 -fstack-protector` (asserts live); outputs go to `build_<profile>` |
+| `--sanitizer <set>` | build/test under sanitizers (`address,thread,undefined,leak,memory`); outputs go to `build_<profile>_<tag>` (e.g. `build_release_asan`) |
 | `--hdr-check {off,warn,error}` | header inclusion-dependency check (default: project `cc_config`) |
 
 Targets accept patterns: `//pkg:name`, `//pkg:*` (a package), `//pkg/...`

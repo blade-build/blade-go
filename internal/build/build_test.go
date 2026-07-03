@@ -633,7 +633,7 @@ func TestClean(t *testing.T) {
 	// The actual `ninja -t clean` path needs a real build + ninja and is
 	// integration-verified on flare rather than here.
 	root := t.TempDir()
-	if err := Clean(root, []string{"//..."}, "release"); err != nil {
+	if err := Clean(root, []string{"//..."}, "release", nil); err != nil {
 		t.Fatalf("clean with no build dir should be a no-op, got %v", err)
 	}
 }
