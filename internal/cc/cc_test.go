@@ -498,3 +498,73 @@ func TestIsHeaderCompilesAsCXX(t *testing.T) {
 		}
 	}
 }
+
+// --- Linux portability fixes (verified against flare on aarch64 Linux) ---
+
+func TestLinkArgsELFGroupsVcpkgWithOwnLibs(t *testing.T) {
+	// On ELF, the target's own archives AND the vcpkg archives must share one
+	// --start-group so forward refs across them (curl -> ssl -> crypto) resolve.
+	gen := New(&toolchain.Toolchain{OS: "linux"})
+	got := gen.linkArgs(
+		[]string{"libbuffer.a"},
+		[]string{"pthread", "dl"},
+		[]string{"/v/libcurl.a", "/v/libssl.a", "/v/libcrypto.a"},
+	)
+	want := "-Wl,--start-group libbuffer.a /v/libcurl.a /v/libssl.a /v/libcrypto.a " +
+		"-Wl,--end-group -lpthread -ldl"
+	if got != want {
+		t.Errorf("ELF linkArgs\n got: %s\nwant: %s", got, want)
+	}
+}
+
+func TestLinkArgsNonELFUngrouped(t *testing.T) {
+	// macOS ld64 re-scans archives; keep the flat order (libs, -l syslibs, vcpkg
+	// args last -- the last may be -framework flags).
+	gen := New(&toolchain.Toolchain{OS: "darwin"})
+	got := gen.linkArgs([]string{"libbuffer.a"}, []string{"pthread"},
+		[]string{"/v/libssl.a", "-framework", "CoreFoundation"})
+	want := "libbuffer.a -lpthread /v/libssl.a -framework CoreFoundation"
+	if got != want {
+		t.Errorf("non-ELF linkArgs\n got: %s\nwant: %s", got, want)
+	}
+}
+
+func TestNormInc(t *testing.T) {
+	cases := []struct{ pkg, inc, want string }{
+		{"flare/base", ".", "flare/base"}, // package-relative
+		{"thirdparty/gperftools", "//build_release/thirdparty/gperftools/include", // root-relative
+			"build_release/thirdparty/gperftools/include"},
+		{"flare/base", "include", "flare/base/include"},
+		{"", ".", "."},
+	}
+	for _, c := range cases {
+		if got := normInc(c.pkg, c.inc); got != c.want {
+			t.Errorf("normInc(%q,%q)=%q, want %q", c.pkg, c.inc, got, c.want)
+		}
+	}
+}
+
+func TestPickForeignArchive(t *testing.T) {
+	// gperftools_build emits many archives shared by sibling foreign_cc_library
+	// targets; each must select lib<name>.a, not an arbitrary one.
+	multi := map[string]string{
+		"libtcmalloc.a":  "build/lib/libtcmalloc.a",
+		"libprofiler.a":  "build/lib/libprofiler.a",
+		"libtcmalloc.so": "build/lib/libtcmalloc.so", // non-.a ignored
+	}
+	if got := pickForeignArchive("libprofiler.a", multi); got != "build/lib/libprofiler.a" {
+		t.Errorf("multi-archive: got %q, want libprofiler.a", got)
+	}
+	if got := pickForeignArchive("libtcmalloc.a", multi); got != "build/lib/libtcmalloc.a" {
+		t.Errorf("multi-archive: got %q, want libtcmalloc.a", got)
+	}
+	// Single-archive build (jsoncpp): resolve even if the name doesn't match.
+	single := map[string]string{"x.a": "build/lib/libjsoncpp.a"}
+	if got := pickForeignArchive("libNOMATCH.a", single); got != "build/lib/libjsoncpp.a" {
+		t.Errorf("single-archive fallback: got %q", got)
+	}
+	// No match among several: refuse to guess.
+	if got := pickForeignArchive("libnope.a", multi); got != "" {
+		t.Errorf("ambiguous no-match should be empty, got %q", got)
+	}
+}

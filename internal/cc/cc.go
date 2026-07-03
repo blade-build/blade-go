@@ -277,18 +277,18 @@ func (gen *Generator) LinkArchives(n *graph.Node) (own string, deps []string) {
 func (gen *Generator) emitRules(f *ninja.File) {
 	f.AddRule(ninja.Rule{
 		Name: "cc", Description: "CC ${out}", Depfile: "${out}.d", Deps: "gcc",
-		Command: "${cc} -MMD -MF ${out}.d ${cppflags} ${cflags} ${c_warnings} ${defs} ${includes} -c ${in} -o ${out}",
+		Command: "${cc} -MMD -MF ${out}.d ${cppflags} ${cflags} ${c_warnings} ${defs} ${extra_compile_flags} ${includes} -c ${in} -o ${out}",
 	})
 	f.AddRule(ninja.Rule{
 		Name: "cxx", Description: "CXX ${out}", Depfile: "${out}.d", Deps: "gcc",
-		Command: "${cxx} -MMD -MF ${out}.d ${cppflags} ${cxxflags} ${cxx_warnings} ${defs} ${includes} -c ${in} -o ${out}",
+		Command: "${cxx} -MMD -MF ${out}.d ${cppflags} ${cxxflags} ${cxx_warnings} ${defs} ${extra_compile_flags} ${includes} -c ${in} -o ${out}",
 	})
 	f.AddRule(ninja.Rule{
 		// A .h compiled standalone (header self-sufficiency check): -x c++ tells
 		// clang++ it's a C++ header, avoiding the deprecated "treating 'c-header'
 		// input as 'c++-header'" warning.
 		Name: "cxx_header", Description: "CXX ${out}", Depfile: "${out}.d", Deps: "gcc",
-		Command: "${cxx} -MMD -MF ${out}.d ${cppflags} ${cxxflags} ${cxx_warnings} ${defs} ${includes} -x c++ -c ${in} -o ${out}",
+		Command: "${cxx} -MMD -MF ${out}.d ${cppflags} ${cxxflags} ${cxx_warnings} ${defs} ${extra_compile_flags} ${includes} -x c++ -c ${in} -o ${out}",
 	})
 	f.AddRule(ninja.Rule{
 		Name: "ar", Description: "AR ${out}",
@@ -518,14 +518,23 @@ func (gen *Generator) emitProto(f *ninja.File, n *graph.Node) (lib string, genHd
 // <build>/<pkg>/<leaf>.h, so consumers that include "<pkg-leaf>/hdr" resolve via
 // -I<build>/<dirname(pkg)>; system_export_incs adds the raw install include dir.
 func (gen *Generator) foreignInfo(n *graph.Node, genFilesOf map[*graph.Node]map[string]string) (lib string, incs []string) {
+	// Blade's ForeignCcLibrary picks its archive by convention -- lib<name>.a for
+	// the target's own name -- or by an explicit `static_library` attr (#1262).
+	// One autotools/cmake gen_rule can emit MANY archives (gperftools_build builds
+	// libtcmalloc.a, libprofiler.a, ... shared by sibling foreign_cc_library
+	// targets tcmalloc, profiler, ...), so selecting "any .a" links the wrong one
+	// (or none) -- e.g. a consumer of :profiler missed libprofiler.a, leaving
+	// ProfilerStart/Stop/Flush undefined. Match the target's archive by basename.
+	want := gen.Tc.StaticLib(n.Target.Name)
+	if sl := n.Target.AttrString("static_library"); sl != "" {
+		want = path.Base(sl)
+	}
 	for _, dep := range n.Deps {
 		if dep.Target.Type != "gen_rule" {
 			continue
 		}
-		for name, p := range genFilesOf[dep] {
-			if strings.HasSuffix(name, ".a") {
-				lib = p
-			}
+		if a := pickForeignArchive(want, genFilesOf[dep]); a != "" {
+			lib = a
 		}
 		pkg := dep.Target.Package
 		incs = append(incs, path.Join(gen.BuildDir, path.Dir(pkg)))
@@ -534,6 +543,30 @@ func (gen *Generator) foreignInfo(n *graph.Node, genFilesOf map[*graph.Node]map[
 		}
 	}
 	return lib, incs
+}
+
+// pickForeignArchive selects a foreign_cc_library's archive from a gen_rule's
+// outputs (name->path). It prefers the one whose basename is `want`
+// (lib<target>.a) so sibling foreign_cc_library targets sharing one multi-archive
+// gen_rule each link their own; it falls back to the sole archive when there is
+// exactly one and none matched (single-archive builds whose basename differs).
+func pickForeignArchive(want string, files map[string]string) string {
+	var only string
+	nA := 0
+	for _, p := range files {
+		if !strings.HasSuffix(p, ".a") {
+			continue
+		}
+		nA++
+		only = p
+		if path.Base(p) == want {
+			return p
+		}
+	}
+	if nA == 1 {
+		return only
+	}
+	return ""
 }
 
 // emitCompiles emits one compile edge per source. It returns the linkable object
@@ -569,6 +602,9 @@ func (gen *Generator) emitCompiles(f *ninja.File, n *graph.Node, implicitHdrs []
 		vars := map[string]string{"includes": inc}
 		if defs != "" {
 			vars["defs"] = defs
+		}
+		if ex := extraCompileFlags(n, src); ex != "" {
+			vars["extra_compile_flags"] = ex
 		}
 		// Suppress warnings for `warning = 'no'` targets and for the standalone
 		// header self-sufficiency check (a header may carry an intentional
@@ -656,6 +692,7 @@ func (gen *Generator) includes(n *graph.Node) string {
 		}
 		visited[node] = true
 		for _, d := range node.Target.AttrStrings("export_incs") {
+			d = normInc(node.Target.Package, d)
 			if !seen[d] {
 				seen[d] = true
 				dirs = append(dirs, d)
@@ -805,16 +842,35 @@ func (gen *Generator) transitiveSyslibs(n *graph.Node) []string {
 }
 
 // linkArgs renders the archive + system-library + vcpkg portion of the link
-// command. `extra` (vcpkg archive paths / -l flags) is appended after the group.
+// command.
+//
+// On ELF (GNU ld/gold/lld/mold), a --start-group is re-scanned to a fixpoint but
+// anything outside it gets a single left-to-right pass, so a forward reference
+// from one archive into a later one (curl -> ssl -> crypto, protobuf -> absl)
+// only resolves if BOTH archives sit inside the same group. The target's own
+// archives and the vcpkg archives therefore go into one group together -- this
+// matches Blade, which collects vcpkg required_archives into usr_libs inside its
+// single group. System `-l` libs follow the group (archives reference them, not
+// the other way round, so one pass after the group suffices).
+//
+// Non-ELF linkers (Apple ld64) re-scan archives regardless, so grouping/order is
+// moot there; that path is left exactly as it was (libs, then -l syslibs, then
+// the vcpkg args, which may include macOS-only `-framework` flags).
 func (gen *Generator) linkArgs(libs, syslibs, extra []string) string {
 	var parts []string
-	if len(libs) > 0 && gen.Tc.GroupsLibraries() {
-		parts = append(parts, "-Wl,--start-group")
-		parts = append(parts, libs...)
-		parts = append(parts, "-Wl,--end-group")
-	} else {
-		parts = append(parts, libs...)
+	if gen.Tc.GroupsLibraries() {
+		grouped := append(append([]string{}, libs...), extra...)
+		if len(grouped) > 0 {
+			parts = append(parts, "-Wl,--start-group")
+			parts = append(parts, grouped...)
+			parts = append(parts, "-Wl,--end-group")
+		}
+		for _, s := range syslibs {
+			parts = append(parts, "-l"+s)
+		}
+		return strings.Join(parts, " ")
 	}
+	parts = append(parts, libs...)
 	for _, s := range syslibs {
 		parts = append(parts, "-l"+s)
 	}
@@ -834,8 +890,56 @@ func (gen *Generator) binPath(n *graph.Node) string {
 // cc_test / cc_benchmark node.
 func (gen *Generator) BinPath(n *graph.Node) string { return gen.binPath(n) }
 
+// normInc resolves an `incs`/`export_incs` entry to a workspace-relative include
+// directory, mirroring Blade's _incs_to_fullpath: a leading `//` marks a
+// root-relative "full path" (strip it -- flare's foreign_cc_library sets
+// export_incs='//'+build_dir/.../include); anything else is relative to the
+// declaring target's package. Without this a `//`-path reaches gcc as
+// `-I//build_dir/...`, which the leading slash makes nonexistent -> a fatal
+// -Wmissing-include-dirs under -Werror (clang silently ignores it, so it only
+// bit on Linux/gcc).
+func normInc(pkg, inc string) string {
+	if strings.HasPrefix(inc, "//") {
+		return path.Clean(inc[2:])
+	}
+	return path.Clean(path.Join(pkg, inc))
+}
+
 func isCXXSource(src string) bool {
 	for _, ext := range []string{".cc", ".cpp", ".cxx", ".C", ".c++", ".mm"} {
+		if strings.HasSuffix(src, ext) {
+			return true
+		}
+	}
+	return false
+}
+
+// extraCompileFlags returns a target's per-source extra compile flags (Blade
+// issue #492). extra_cppflags apply to every C-family source; the
+// language-specific set is added on top -- extra_cxxflags for C++/Objective-C++
+// (.cc/.cpp/.cxx/.mm), extra_asflags for assembly (.s/.S/.asm), extra_cflags
+// otherwise (C and Objective-C .m). They sit after the global cc_config flags in
+// the compile command so a target can override them -- e.g. flare's crypto md5/
+// sha targets pass -Wno-deprecated-declarations to silence OpenSSL 3.x's
+// deprecation of the low-level HMAC/SHA APIs under the project-wide -Werror.
+// Headers (compiled standalone as C++) take the C++ set, matching their rule.
+func extraCompileFlags(n *graph.Node, src string) string {
+	flags := append([]string{}, n.Target.AttrStrings("extra_cppflags")...)
+	switch {
+	case isCXXSource(src), isHeader(src):
+		flags = append(flags, n.Target.AttrStrings("extra_cxxflags")...)
+	case isAsmSource(src):
+		flags = append(flags, n.Target.AttrStrings("extra_asflags")...)
+	default:
+		flags = append(flags, n.Target.AttrStrings("extra_cflags")...)
+	}
+	return strings.Join(flags, " ")
+}
+
+// isAsmSource reports whether src is an assembly source (the cc driver assembles
+// .s/.S; .asm is MASM, routed elsewhere but classified here for extra_asflags).
+func isAsmSource(src string) bool {
+	for _, ext := range []string{".s", ".S", ".asm"} {
 		if strings.HasSuffix(src, ext) {
 			return true
 		}
