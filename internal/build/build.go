@@ -438,13 +438,12 @@ func Test(root string, targets []string, opt Options, onResult func(TestResult))
 			return
 		}
 
-		// Stage under the lock: two tests in one package write the same dir.
-		mu.Lock()
-		runtimeDir := stageTestdata(root, node, binRel)
-		mu.Unlock()
+		// Each test gets its own runfiles dir (unique path -> concurrency-safe
+		// without a lock), so relative I/O like ./dump.txt doesn't collide.
+		runDir := prepareRunDir(root, node, binRel)
 		cmd := exec.Command(filepath.Join(root, binRel))
-		if runtimeDir != "" {
-			cmd.Dir = runtimeDir // the test reads its testdata relative to here
+		if runDir != "" {
+			cmd.Dir = runDir // isolated cwd + staged testdata
 		}
 		out, runErr := cmd.CombinedOutput() // the slow part -- runs unlocked
 		res := TestResult{Label: node.Label(), Passed: runErr == nil, Output: string(out)}
@@ -559,7 +558,7 @@ func Run(root, target string, args []string, opt Options) (int, error) {
 	binRel := gen.BinPath(node)
 	cmd := exec.Command(filepath.Join(root, binRel), args...)
 	cmd.Stdin, cmd.Stdout, cmd.Stderr = os.Stdin, os.Stdout, os.Stderr
-	if dir := stageTestdata(root, node, binRel); dir != "" {
+	if dir := prepareRunDir(root, node, binRel); dir != "" {
 		cmd.Dir = dir
 	}
 	if err := cmd.Run(); err != nil {
@@ -578,21 +577,26 @@ func Run(root, target string, args []string, opt Options) (int, error) {
 // package's testdata/ dir available as conf/ so the test reads "conf/x.yaml".
 // blade runs tests from this dir; mirroring that lets data-driven tests find
 // their files.
-func stageTestdata(root string, n *graph.Node, binRel string) string {
-	entries := testdataEntries(root, n)
-	if len(entries) == 0 {
+// prepareRunDir gives a test its OWN runfiles directory and stages its testdata
+// there; the test runs with this dir as cwd. This isolates relative-path I/O --
+// e.g. flare's binlog tests all write "./dump.txt" -- so parallel siblings don't
+// clobber each other. Mirrors blade, which runs each test from a per-target
+// runfiles dir. Returns "" only if the dir can't be created (fall back to no cwd
+// change).
+func prepareRunDir(root string, n *graph.Node, binRel string) string {
+	runDir := filepath.Join(root, binRel+".runfiles") // build_dir/<pkg>/<name>.runfiles
+	if err := os.MkdirAll(runDir, 0o755); err != nil {
 		return ""
 	}
-	runtimeDir := filepath.Join(root, filepath.Dir(binRel)) // build_dir/<pkg>
-	for _, e := range entries {
-		dstPath := filepath.Join(runtimeDir, filepath.FromSlash(e.dst))
+	for _, e := range testdataEntries(root, n) {
+		dstPath := filepath.Join(runDir, filepath.FromSlash(e.dst))
 		if err := os.MkdirAll(filepath.Dir(dstPath), 0o755); err != nil {
 			continue
 		}
 		os.RemoveAll(dstPath)              // replace any stale staging
 		_ = os.Symlink(e.srcPath, dstPath) // absolute symlink to the source data
 	}
-	return runtimeDir
+	return runDir
 }
 
 type testdataEntry struct {

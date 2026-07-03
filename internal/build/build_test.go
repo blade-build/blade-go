@@ -675,11 +675,10 @@ func TestQuery(t *testing.T) {
 	}
 }
 
-func TestStageTestdata(t *testing.T) {
-	// ('testdata','conf') stages the package's testdata/ dir as conf/ next to the
-	// test binary; the returned dir is the test's cwd.
+func TestPrepareRunDir(t *testing.T) {
+	// Each test gets its OWN runfiles dir (<bin>.runfiles) with testdata staged;
+	// ('testdata','conf') makes the package's testdata/ available as conf/.
 	root := t.TempDir()
-	// source data file
 	if err := os.MkdirAll(filepath.Join(root, "pkg/sub/testdata"), 0o755); err != nil {
 		t.Fatal(err)
 	}
@@ -691,14 +690,19 @@ func TestStageTestdata(t *testing.T) {
 		Attrs: map[string]any{"testdata": []any{[]any{"testdata", "conf"}}},
 	}}
 	binRel := "build64_release/pkg/sub/t"
-	dir := stageTestdata(root, n, binRel)
-	if want := filepath.Join(root, "build64_release/pkg/sub"); dir != want {
-		t.Fatalf("runtime dir=%q, want %q", dir, want)
+	dir := prepareRunDir(root, n, binRel)
+	if want := filepath.Join(root, binRel+".runfiles"); dir != want {
+		t.Fatalf("run dir=%q, want per-test %q", dir, want)
 	}
 	// conf/x.yaml resolves (via the symlink) to the source data.
 	got, err := os.ReadFile(filepath.Join(dir, "conf", "x.yaml"))
 	if err != nil || string(got) != "k: v" {
 		t.Errorf("conf/x.yaml not staged: data=%q err=%v", got, err)
+	}
+	// Two tests in one package get distinct dirs (isolation).
+	n2 := &graph.Node{Target: &target.Target{Type: "cc_test", Name: "u", Package: "pkg/sub"}}
+	if d2 := prepareRunDir(root, n2, "build64_release/pkg/sub/u"); d2 == dir {
+		t.Errorf("sibling tests share a run dir: %q", d2)
 	}
 }
 
