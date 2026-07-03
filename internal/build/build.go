@@ -3,7 +3,10 @@
 package build
 
 import (
+	"crypto/md5"
+	"encoding/json"
 	"fmt"
+	"io/fs"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -230,6 +233,7 @@ func FindRoot(start string) (string, error) {
 type Options struct {
 	RunNinja  bool     // run ninja after generating build.ninja
 	NinjaArgs []string // extra ninja flags (e.g. -j N, -k 0, -n) from the CLI
+	FullTest  bool     // re-run every test, ignoring the incremental cache
 }
 
 // timing reports per-phase front-end durations to stderr when BLADE_TIMING is
@@ -363,12 +367,18 @@ type TestResult struct {
 	Label  string
 	Passed bool
 	Output string
+	Cached bool // reported without re-running: passed last time, inputs unchanged
 }
 
 // Test builds the given targets and runs each that is a cc_test, returning one
 // result per test target (in request order). onResult, if non-nil, is called as
 // each test finishes -- so a caller can stream progress instead of waiting for
 // the whole (possibly slow) suite, which otherwise looks hung.
+//
+// Incremental: a test that passed last time and whose inputs (its binary and
+// testdata) are unchanged is reported cached without re-running, unless
+// opt.FullTest. (Environment variables are deliberately not part of the
+// fingerprint -- blade-go doesn't set test env yet; revisit if it ever does.)
 func Test(root string, targets []string, opt Options, onResult func(TestResult)) ([]TestResult, error) {
 	g, gen, f, expanded, err := plan(root, targets)
 	if err != nil {
@@ -382,6 +392,7 @@ func Test(root string, targets []string, opt Options, onResult func(TestResult))
 	// run -- one target that won't compile shouldn't hide the rest of a sweep.
 	// (Errors are surfaced; a test whose binary is missing is reported failed.)
 	runNinja(root, buildFile, append([]string{"-k", "0"}, opt.NinjaArgs...)...)
+	hist := loadTestHistory(root)
 	var results []TestResult
 	for _, r := range expanded {
 		lbl, err := label.Parse(r, "")
@@ -393,6 +404,20 @@ func Test(root string, targets []string, opt Options, onResult func(TestResult))
 			continue
 		}
 		binRel := gen.BinPath(node)
+		fp := testFingerprint(root, binRel, node)
+
+		// Incremental skip: passed last time, inputs unchanged.
+		if !opt.FullTest {
+			if rec, ok := hist[node.Label()]; ok && rec.Passed && rec.Fingerprint == fp {
+				res := TestResult{Label: node.Label(), Passed: true, Cached: true}
+				if onResult != nil {
+					onResult(res)
+				}
+				results = append(results, res)
+				continue
+			}
+		}
+
 		runtimeDir := stageTestdata(root, node, binRel)
 		cmd := exec.Command(filepath.Join(root, binRel))
 		if runtimeDir != "" {
@@ -400,12 +425,63 @@ func Test(root string, targets []string, opt Options, onResult func(TestResult))
 		}
 		out, runErr := cmd.CombinedOutput()
 		res := TestResult{Label: node.Label(), Passed: runErr == nil, Output: string(out)}
+		hist[node.Label()] = testRecord{Passed: res.Passed, Fingerprint: fp}
 		if onResult != nil {
 			onResult(res)
 		}
 		results = append(results, res)
 	}
+	saveTestHistory(root, hist)
 	return results, nil
+}
+
+// testRecord is one test's last outcome + input fingerprint, persisted across
+// runs for incremental testing.
+type testRecord struct {
+	Passed      bool   `json:"passed"`
+	Fingerprint string `json:"fp"`
+}
+
+type testHistory map[string]testRecord
+
+func testHistoryPath(root string) string {
+	return filepath.Join(root, cc.New(toolchain.Detect()).BuildDir, ".blade-go-test-history.json")
+}
+
+func loadTestHistory(root string) testHistory {
+	h := testHistory{}
+	if b, err := os.ReadFile(testHistoryPath(root)); err == nil {
+		_ = json.Unmarshal(b, &h)
+	}
+	return h
+}
+
+func saveTestHistory(root string, h testHistory) {
+	if b, err := json.MarshalIndent(h, "", "  "); err == nil {
+		_ = os.WriteFile(testHistoryPath(root), b, 0o644)
+	}
+}
+
+// testFingerprint hashes a test's inputs: its binary (mtime+size) and every
+// testdata file (path+mtime+size). Changing a source recompiles the binary (new
+// mtime) and editing testdata changes its stat -- either invalidates the cache.
+func testFingerprint(root, binRel string, n *graph.Node) string {
+	h := md5.New()
+	if st, err := os.Stat(filepath.Join(root, binRel)); err == nil {
+		fmt.Fprintf(h, "bin\x00%d\x00%d\n", st.ModTime().UnixNano(), st.Size())
+	}
+	for _, e := range testdataEntries(root, n) {
+		_ = filepath.WalkDir(e.srcPath, func(p string, d fs.DirEntry, err error) error {
+			if err != nil || d.IsDir() {
+				return nil
+			}
+			if info, e := d.Info(); e == nil {
+				fmt.Fprintf(h, "td\x00%s\x00%d\x00%d\n", p, info.ModTime().UnixNano(), info.Size())
+			}
+			return nil
+		})
+	}
+	return fmt.Sprintf("%x", h.Sum(nil))
 }
 
 // Run builds a single runnable target (cc_binary or cc_test) and executes it,
@@ -456,12 +532,36 @@ func Run(root, target string, args []string, opt Options) (int, error) {
 // blade runs tests from this dir; mirroring that lets data-driven tests find
 // their files.
 func stageTestdata(root string, n *graph.Node, binRel string) string {
-	raw, ok := n.Target.Attrs["testdata"].([]any)
-	if !ok || len(raw) == 0 {
+	entries := testdataEntries(root, n)
+	if len(entries) == 0 {
 		return ""
 	}
 	runtimeDir := filepath.Join(root, filepath.Dir(binRel)) // build_dir/<pkg>
+	for _, e := range entries {
+		dstPath := filepath.Join(runtimeDir, filepath.FromSlash(e.dst))
+		if err := os.MkdirAll(filepath.Dir(dstPath), 0o755); err != nil {
+			continue
+		}
+		os.RemoveAll(dstPath)              // replace any stale staging
+		_ = os.Symlink(e.srcPath, dstPath) // absolute symlink to the source data
+	}
+	return runtimeDir
+}
+
+type testdataEntry struct {
+	srcPath string // absolute source path
+	dst     string // runtime-relative destination
+}
+
+// testdataEntries resolves a target's `testdata` attribute to (source, dest)
+// pairs. Each entry is a path (staged at the same name) or a (src, dst) tuple.
+func testdataEntries(root string, n *graph.Node) []testdataEntry {
+	raw, ok := n.Target.Attrs["testdata"].([]any)
+	if !ok || len(raw) == 0 {
+		return nil
+	}
 	pkg := filepath.FromSlash(n.Target.Package)
+	var out []testdataEntry
 	for _, e := range raw {
 		src, dst := "", ""
 		switch v := e.(type) {
@@ -485,14 +585,9 @@ func stageTestdata(root string, n *graph.Node, binRel string) string {
 		} else {
 			srcPath = filepath.Join(root, pkg, filepath.FromSlash(src))
 		}
-		dstPath := filepath.Join(runtimeDir, filepath.FromSlash(dst))
-		if err := os.MkdirAll(filepath.Dir(dstPath), 0o755); err != nil {
-			continue
-		}
-		os.RemoveAll(dstPath)            // replace any stale staging
-		_ = os.Symlink(srcPath, dstPath) // absolute symlink to the source data
+		out = append(out, testdataEntry{srcPath: srcPath, dst: dst})
 	}
-	return runtimeDir
+	return out
 }
 
 // Clean removes the build output directory.
