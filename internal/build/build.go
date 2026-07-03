@@ -453,6 +453,32 @@ func DefaultJobs() int {
 	return 1
 }
 
+// CompileDB generates a clang-style compilation database (compile_commands.json)
+// for the requested targets. It plans + writes the ninja file, then asks ninja
+// itself (`ninja -t compdb`) to emit the JSON for the compile rules -- reusing
+// the exact commands ninja would run, so the database always matches the build.
+func CompileDB(root string, targets []string, profile string) ([]byte, error) {
+	_, gen, f, _, err := plan(root, targets, profile)
+	if err != nil {
+		return nil, err
+	}
+	buildFile, err := writeNinja(root, gen, f)
+	if err != nil {
+		return nil, err
+	}
+	rel, _ := filepath.Rel(root, buildFile)
+	// Only the compile rules belong in a compilation database (not ar/link/gen/
+	// protoc). These are the rule names emitted by the cc generator.
+	cmd := exec.Command("ninja", "-f", rel, "-t", "compdb", "cc", "cxx", "cxx_header")
+	cmd.Dir = root
+	cmd.Stderr = os.Stderr
+	out, err := cmd.Output()
+	if err != nil {
+		return nil, fmt.Errorf("ninja -t compdb: %w", err)
+	}
+	return out, nil
+}
+
 // TestResult is the outcome of running one cc_test target.
 type TestResult struct {
 	Label  string
