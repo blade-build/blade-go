@@ -9,7 +9,9 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/blade-build/blade-go/internal/graph"
 	"github.com/blade-build/blade-go/internal/ninjaparse"
+	"github.com/blade-build/blade-go/internal/target"
 )
 
 func TestFindRoot(t *testing.T) {
@@ -662,5 +664,32 @@ func TestQuery(t *testing.T) {
 	}
 	if want := []string{"//app:app", "//lib:lib"}; !reflect.DeepEqual(res[0].Related, want) {
 		t.Errorf("--dependents //base:base = %v, want %v", res[0].Related, want)
+	}
+}
+
+func TestStageTestdata(t *testing.T) {
+	// ('testdata','conf') stages the package's testdata/ dir as conf/ next to the
+	// test binary; the returned dir is the test's cwd.
+	root := t.TempDir()
+	// source data file
+	if err := os.MkdirAll(filepath.Join(root, "pkg/sub/testdata"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(root, "pkg/sub/testdata/x.yaml"), []byte("k: v"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	n := &graph.Node{Target: &target.Target{
+		Type: "cc_test", Name: "t", Package: "pkg/sub",
+		Attrs: map[string]any{"testdata": []any{[]any{"testdata", "conf"}}},
+	}}
+	binRel := "build64_release/pkg/sub/t"
+	dir := stageTestdata(root, n, binRel)
+	if want := filepath.Join(root, "build64_release/pkg/sub"); dir != want {
+		t.Fatalf("runtime dir=%q, want %q", dir, want)
+	}
+	// conf/x.yaml resolves (via the symlink) to the source data.
+	got, err := os.ReadFile(filepath.Join(dir, "conf", "x.yaml"))
+	if err != nil || string(got) != "k: v" {
+		t.Errorf("conf/x.yaml not staged: data=%q err=%v", got, err)
 	}
 }
