@@ -3,7 +3,10 @@
 package cc
 
 import (
+	"os"
 	"path"
+	"path/filepath"
+	"runtime"
 	"strings"
 
 	"github.com/blade-build/blade-go/internal/graph"
@@ -16,6 +19,7 @@ import (
 // Generator turns a resolved graph into a ninja file.
 type Generator struct {
 	Tc               *toolchain.Toolchain
+	Root             string           // workspace root (abs), for locating prebuilt library files
 	BuildDir         string           // build output dir (e.g. "build_release")
 	Profile          string           // "release" or "debug" (drives optimize/NDEBUG flags)
 	DebugInfo        string           // "" (project default) or no|low|mid|high (-g level override)
@@ -160,6 +164,13 @@ func (gen *Generator) Generate(g *graph.Graph) (*ninja.File, error) {
 				genHdrsOf[n] = []string{lib}
 			}
 			gen.foreignIncs[n] = incs
+		case n.Target.Type == "prebuilt_cc_library":
+			// A pre-built library referenced (not compiled) from the source tree.
+			// Expose its archive to consumers' links via libOf; its export_incs are
+			// picked up by includes() like any dep. No build edge -- the file exists.
+			if lib := gen.prebuiltLib(n); lib != "" {
+				libOf[n] = lib
+			}
 		case n.Target.Type == "proto_library":
 			lib, hdrs := gen.emitProto(f, n)
 			libOf[n] = lib
@@ -269,6 +280,47 @@ func (gen *Generator) emitRules(f *ninja.File) {
 		Name: "resource", Description: "RESOURCE ${in}",
 		Command: "${self} __gen-resource ${out} ${in}",
 	})
+}
+
+// prebuiltLib resolves a prebuilt_cc_library's archive (workspace-relative). The
+// library lives at <pkg>/<libpath>/lib<name><suffix>, where libpath is the
+// target's libpath_pattern or the default "lib${bits}" (Blade's
+// cc_library_config.prebuilt_libpath_pattern), with ${bits}/${arch}/${profile}
+// substituted. Static (.a) is preferred over the dynamic library; "" when neither
+// exists (Blade tolerates an unused, absent prebuilt).
+func (gen *Generator) prebuiltLib(n *graph.Node) string {
+	pattern := n.Target.AttrString("libpath_pattern")
+	if pattern == "" {
+		pattern = "lib${bits}"
+	}
+	libdir := strings.NewReplacer(
+		"${bits}", "64",
+		"${arch}", prebuiltArch(),
+		"${profile}", gen.Profile,
+	).Replace(pattern)
+	base := path.Join(n.Target.Package, libdir)
+	dyn := ".so"
+	if gen.Tc.OS == "darwin" {
+		dyn = ".dylib"
+	}
+	for _, suffix := range []string{".a", dyn} {
+		rel := path.Join(base, "lib"+n.Target.Name+suffix)
+		if _, err := os.Stat(filepath.Join(gen.Root, rel)); err == nil {
+			return rel
+		}
+	}
+	return ""
+}
+
+// prebuiltArch maps Go's GOARCH to Blade's ${arch} spelling.
+func prebuiltArch() string {
+	switch runtime.GOARCH {
+	case "amd64":
+		return "x86_64"
+	case "arm64":
+		return "aarch64"
+	}
+	return runtime.GOARCH
 }
 
 // emitResourceLibrary emits blade's resource_library: an index (.h/.c) plus one

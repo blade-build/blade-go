@@ -313,6 +313,67 @@ func TestWarningsWiring(t *testing.T) {
 	}
 }
 
+// A prebuilt_cc_library's archive (lib${bits}/lib<name>.a in the source tree) is
+// linked by a consumer; no build edge compiles it.
+func TestEndToEndPrebuilt(t *testing.T) {
+	if _, err := exec.LookPath("ninja"); err != nil {
+		t.Skip("ninja not available")
+	}
+	tc := toolchain.Detect()
+	if _, err := exec.LookPath(tc.CC); err != nil {
+		t.Skip("C compiler not available")
+	}
+	g, root := buildGraph(t, map[string]string{
+		"ext/greet.h": "const char* greet(void);\n",
+		"ext/greet.c": "const char* greet(void){ return \"hi-prebuilt\"; }\n",
+		"ext/BUILD":   `prebuilt_cc_library(name = 'greet', hdrs = ['greet.h'], visibility = ['PUBLIC'])`,
+		"app/main.cc": `extern "C" {
+#include "ext/greet.h"
+}
+#include <cstdio>
+int main(){ printf("%s\n", greet()); return 0; }
+`,
+		"app/BUILD": `cc_binary(name = 'app', srcs = ['main.cc'], deps = ['//ext:greet'])`,
+	}, "//app:app")
+
+	// Produce the prebuilt archive at ext/lib64/libgreet.a from ext/greet.c.
+	if err := os.MkdirAll(filepath.Join(root, "ext/lib64"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	obj := filepath.Join(root, "ext/greet.o")
+	if o, err := exec.Command(tc.CC, "-c", filepath.Join(root, "ext/greet.c"), "-o", obj).CombinedOutput(); err != nil {
+		t.Fatalf("compile prebuilt: %v\n%s", err, o)
+	}
+	if o, err := exec.Command(tc.AR, "rcs", filepath.Join(root, "ext/lib64/libgreet.a"), obj).CombinedOutput(); err != nil {
+		t.Fatalf("ar prebuilt: %v\n%s", err, o)
+	}
+
+	gen := New(tc)
+	gen.Root = root
+	f, err := gen.Generate(g)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(f.String(), "ext/lib64/libgreet.a") {
+		t.Fatalf("app link does not reference the prebuilt archive:\n%s", f.String())
+	}
+	if err := os.WriteFile(filepath.Join(root, "build.ninja"), []byte(f.String()), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	nc := exec.Command("ninja", "-f", "build.ninja", "build_release/app/app")
+	nc.Dir = root
+	if o, err := nc.CombinedOutput(); err != nil {
+		t.Fatalf("ninja: %v\n%s", err, o)
+	}
+	o, err := exec.Command(filepath.Join(root, "build_release/app/app")).CombinedOutput()
+	if err != nil {
+		t.Fatalf("run: %v\n%s", err, o)
+	}
+	if strings.TrimSpace(string(o)) != "hi-prebuilt" {
+		t.Errorf("output=%q, want hi-prebuilt", strings.TrimSpace(string(o)))
+	}
+}
+
 func TestVcpkgLinkFlags(t *testing.T) {
 	vroot := t.TempDir()
 	installed := filepath.Join(vroot, "installed", "x64-linux")
