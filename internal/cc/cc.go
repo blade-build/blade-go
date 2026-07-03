@@ -330,6 +330,14 @@ func (gen *Generator) emitGenRule(f *ninja.File, n *graph.Node, genFilesOf map[*
 		"$FIRST_SRC", firstSrc,
 		"$SRC_DIR", pkg,
 		"$BUILD_DIR", gen.BuildDir,
+		// Resolve flare's single-overlay-triplet protoc glob to blade-go's concrete
+		// compat dir. flare/tools/build_rules.bld hardcodes a shell glob
+		// ".cache/vcpkg/installed/blade-*/tools/protobuf/protoc", assuming exactly
+		// one "blade-*" triplet. When blade-go shares the build dir with Python
+		// Blade (build_release), that dir holds several blade-* triplets, so the
+		// glob would expand to multiple protoc paths and protoc parses a protoc
+		// binary as a .proto. Emitting the concrete blade-go path avoids the glob.
+		".cache/vcpkg/installed/blade-*/", ".cache/vcpkg/installed/blade-go/",
 	).Replace(n.Target.AttrString("cmd"))
 	f.AddBuild(ninja.Build{Outputs: outs, Rule: "gen", Inputs: srcs, Implicit: implicit, Vars: map[string]string{"cmd": cmd}})
 }
