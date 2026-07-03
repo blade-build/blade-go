@@ -239,6 +239,7 @@ type Options struct {
 	FullTest  bool     // re-run every test, ignoring the incremental cache
 	TestJobs  int      // parallel test workers (0 = CPUs available to the process, cgroup-aware)
 	Profile   string   // "release" (default) or "debug"; selects build_<profile> + flags
+	DebugInfo string   // "" (project default) or no|low|mid|high (-g level)
 }
 
 // buildDirFor is the output directory for a profile: build_release / build_debug.
@@ -318,7 +319,7 @@ func loadGraph(root string, targets []string, profile string) (*loader.Loader, *
 
 // plan loads the workspace and produces the graph, generator, and ninja file for
 // the given targets (patterns are expanded to concrete labels, also returned).
-func plan(root string, targets []string, profile string) (*graph.Graph, *cc.Generator, *ninja.File, []string, error) {
+func plan(root string, targets []string, profile, debugInfo string) (*graph.Graph, *cc.Generator, *ninja.File, []string, error) {
 	tm := newTiming()
 	l, g, expanded, err := loadGraph(root, targets, profile)
 	if err != nil {
@@ -328,6 +329,16 @@ func plan(root string, targets []string, profile string) (*graph.Graph, *cc.Gene
 	gen := cc.New(toolchain.Detect())
 	gen.BuildDir = buildDirFor(profile)
 	gen.Profile = normProfile(profile)
+	// Debug-info level: --debug-info-level override, else global_config, else the
+	// project's own -g flags (empty here).
+	gen.DebugInfo = debugInfo
+	if gen.DebugInfo == "" {
+		if v, ok := l.Config.GetItem("global_config", "debug_info_level"); ok {
+			if s, ok := v.(string); ok {
+				gen.DebugInfo = s
+			}
+		}
+	}
 	if exe, err := os.Executable(); err == nil {
 		gen.Self = exe // resource_library codegen re-invokes this binary
 	}
@@ -371,7 +382,7 @@ func runNinja(root, buildFile string, extraArgs ...string) error {
 // Build loads the workspace, generates the ninja file for the given targets, and
 // (optionally) runs ninja. It returns the path of the generated ninja file.
 func Build(root string, targets []string, opt Options) (string, error) {
-	_, gen, f, _, err := plan(root, targets, opt.Profile)
+	_, gen, f, _, err := plan(root, targets, opt.Profile, opt.DebugInfo)
 	if err != nil {
 		return "", err
 	}
@@ -480,7 +491,7 @@ func DefaultJobs() int {
 // itself (`ninja -t compdb`) to emit the JSON for the compile rules -- reusing
 // the exact commands ninja would run, so the database always matches the build.
 func CompileDB(root string, targets []string, profile string) ([]byte, error) {
-	_, gen, f, _, err := plan(root, targets, profile)
+	_, gen, f, _, err := plan(root, targets, profile, "")
 	if err != nil {
 		return nil, err
 	}
@@ -519,7 +530,7 @@ type TestResult struct {
 // opt.FullTest. (Environment variables are deliberately not part of the
 // fingerprint -- blade-go doesn't set test env yet; revisit if it ever does.)
 func Test(root string, targets []string, opt Options, onResult func(TestResult)) ([]TestResult, error) {
-	g, gen, f, expanded, err := plan(root, targets, opt.Profile)
+	g, gen, f, expanded, err := plan(root, targets, opt.Profile, opt.DebugInfo)
 	if err != nil {
 		return nil, err
 	}
@@ -669,7 +680,7 @@ func testFingerprint(root, binRel string, n *graph.Node) string {
 // Run builds a single runnable target (cc_binary or cc_test) and executes it,
 // forwarding args and the current stdio; it returns the program's exit code.
 func Run(root, target string, args []string, opt Options) (int, error) {
-	g, gen, f, _, err := plan(root, []string{target}, opt.Profile)
+	g, gen, f, _, err := plan(root, []string{target}, opt.Profile, opt.DebugInfo)
 	if err != nil {
 		return 1, err
 	}
@@ -791,7 +802,7 @@ func Clean(root string, targets []string, profile string) error {
 	if _, err := os.Stat(filepath.Join(root, buildDirFor(profile))); os.IsNotExist(err) {
 		return nil // nothing built, nothing to clean
 	}
-	_, gen, f, _, err := plan(root, targets, profile)
+	_, gen, f, _, err := plan(root, targets, profile, "")
 	if err != nil {
 		return err
 	}
