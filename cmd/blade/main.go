@@ -17,6 +17,7 @@ import (
 	"github.com/spf13/cobra"
 
 	"github.com/blade-build/blade-go/internal/build"
+	"github.com/blade-build/blade-go/internal/ccundef"
 	"github.com/blade-build/blade-go/internal/hdrcheck"
 	"github.com/blade-build/blade-go/internal/resource"
 	"github.com/blade-build/blade-go/internal/sanitizer"
@@ -88,6 +89,19 @@ type buildFlags struct {
 	debugInfo string // debug-info level: no|low|mid|high ("" = project default)
 	sanitizer string // --sanitizer set (comma-separated: address,thread,undefined,leak,memory)
 	coverage  bool   // --coverage: instrument for gcov coverage
+	ccUndef   bool   // --cc-check-undefined: force-enable the undefined-symbol check
+	noCcUndef bool   // --no-cc-check-undefined: force-disable it
+}
+
+// ccUndefOverride resolves the two toggle flags to "true"/"false"/"" (config).
+func (bf *buildFlags) ccUndefOverride() string {
+	switch {
+	case bf.noCcUndef:
+		return "false"
+	case bf.ccUndef:
+		return "true"
+	}
+	return ""
 }
 
 // register adds the flags to fs and tolerates unknown Blade flags.
@@ -103,6 +117,8 @@ func (bf *buildFlags) register(c *cobra.Command) {
 	f.StringVar(&bf.debugInfo, "debug-info-level", "", "debug info level: no|low|mid|high (default: project global_config)")
 	f.StringVar(&bf.sanitizer, "sanitizer", "", "build/test under sanitizers: address,thread,undefined,leak,memory (comma-separated)")
 	f.BoolVar(&bf.coverage, "coverage", false, "instrument for gcov coverage; `blade test --coverage` reports via gcovr")
+	f.BoolVar(&bf.ccUndef, "cc-check-undefined", false, "force-enable the cc_library undefined-symbol check")
+	f.BoolVar(&bf.noCcUndef, "no-cc-check-undefined", false, "force-disable the cc_library undefined-symbol check")
 
 	// Blade's boolean (store_true) flags that blade-go doesn't act on: declare
 	// them (hidden) so they parse as booleans and don't swallow a following
@@ -111,8 +127,8 @@ func (bf *buildFlags) register(c *cobra.Command) {
 	for _, name := range []string{
 		"verbose", "quiet", "gcov", "gprof", "fission", "dwp", "force",
 		"no-test", "generate-dynamic", "generate-java", "generate-php",
-		"generate-python", "generate-go", "generate-package", "cc-check-undefined",
-		"no-cc-check-undefined", "load-local-config", "no-load-local-config",
+		"generate-python", "generate-go", "generate-package",
+		"load-local-config", "no-load-local-config",
 		"profiling", "autofdo-generate", "run-unrepaired-tests", "show-details",
 		"all-tags", "no-debug-info",
 	} {
@@ -201,7 +217,10 @@ func newBuildCmd() *cobra.Command {
 			// The header check reads the `.d` depfiles a build produces, so run
 			// it only when we actually built (not --no-build / --stop-after).
 			if run {
-				return runHdrCheck(root, targets, bf.hdrCheck, bf.profile, sans, bf.coverage)
+				if err := runHdrCheck(root, targets, bf.hdrCheck, bf.profile, sans, bf.coverage); err != nil {
+					return err
+				}
+				return runCcUndef(root, targets, bf.ccUndefOverride(), bf.profile, sans, bf.coverage)
 			}
 			return nil
 		},
@@ -234,6 +253,32 @@ func runHdrCheck(root string, targets []string, override, profile string, saniti
 	fmt.Fprintf(os.Stderr, "blade: hdr-check found %d issue(s)\n", len(issues))
 	if fatal > 0 {
 		return fmt.Errorf("header check failed: %d error(s)", fatal)
+	}
+	return nil
+}
+
+// runCcUndef runs the static undefined-symbol check and reports issues in
+// GCC-diagnostic form. Fails the command only when the effective severity is
+// "error".
+func runCcUndef(root string, targets []string, override, profile string, sanitizers []string, coverage bool) error {
+	issues, err := build.CheckUndefined(root, targets, override, profile, sanitizers, coverage)
+	if err != nil {
+		return err
+	}
+	fatal := 0
+	for _, is := range issues {
+		word := "warning"
+		if is.Sev == ccundef.Error {
+			word = "error"
+			fatal++
+		}
+		fmt.Fprintln(os.Stderr, is.Format(word))
+	}
+	if len(issues) > 0 {
+		fmt.Fprintf(os.Stderr, "blade: cc-check-undefined found %d target(s) with undefined symbols\n", len(issues))
+	}
+	if fatal > 0 {
+		return fmt.Errorf("undefined-symbol check failed: %d target(s)", fatal)
 	}
 	return nil
 }
@@ -304,10 +349,14 @@ func newTestCmd() *cobra.Command {
 			// its targets -- runs it too. A test failure takes precedence in the exit
 			// code, but the check still reports either way.
 			hdrErr := runHdrCheck(root, targets, bf.hdrCheck, bf.profile, sans, bf.coverage)
+			undefErr := runCcUndef(root, targets, bf.ccUndefOverride(), bf.profile, sans, bf.coverage)
 			if passed != len(results) {
 				return fmt.Errorf("%d test(s) failed", len(results)-passed)
 			}
-			return hdrErr
+			if hdrErr != nil {
+				return hdrErr
+			}
+			return undefErr
 		},
 	}
 	bf.register(c)
