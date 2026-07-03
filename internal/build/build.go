@@ -251,15 +251,20 @@ type Options struct {
 	Profile    string   // "release" (default) or "debug"; selects build_<profile> + flags
 	DebugInfo  string   // "" (project default) or no|low|mid|high (-g level)
 	Sanitizers []string // canonical sanitizer set (nil = off); adds a build-dir tag + flags
+	Coverage   bool     // --coverage: instrument for gcov coverage; adds a build-dir tag + flags
 }
 
-// buildDirFor is the output directory for a profile + sanitizer set:
-// build_<profile> or build_<profile>_<tag> (e.g. build_release_asan). An empty
-// or unknown profile falls back to release.
-func buildDirFor(profile string, sanitizers []string) string {
+// buildDirFor is the output directory for a profile + variant set:
+// build_<profile>[_coverage][_<sanitizer-tag>] (e.g. build_release_asan,
+// build_release_coverage). Each variant is codegen-incompatible with a plain
+// build, so it gets its own tree. An empty/unknown profile falls back to release.
+func buildDirFor(profile string, sanitizers []string, coverage bool) string {
 	dir := "build_release"
 	if profile == "debug" {
 		dir = "build_debug"
+	}
+	if coverage { // coverage before the sanitizer tag, matching Blade's variant suffix
+		dir += "_coverage"
 	}
 	if tag := sanitizer.BuildTag(sanitizers); tag != "" {
 		dir += "_" + tag
@@ -335,9 +340,9 @@ func loadGraph(root string, targets []string, buildDir string) (*loader.Loader, 
 
 // plan loads the workspace and produces the graph, generator, and ninja file for
 // the given targets (patterns are expanded to concrete labels, also returned).
-func plan(root string, targets []string, profile, debugInfo string, sanitizers []string) (*graph.Graph, *cc.Generator, *ninja.File, []string, error) {
+func plan(root string, targets []string, profile, debugInfo string, sanitizers []string, coverage bool) (*graph.Graph, *cc.Generator, *ninja.File, []string, error) {
 	tm := newTiming()
-	buildDir := buildDirFor(profile, sanitizers)
+	buildDir := buildDirFor(profile, sanitizers, coverage)
 	l, g, expanded, err := loadGraph(root, targets, buildDir)
 	if err != nil {
 		return nil, nil, nil, nil, err
@@ -349,6 +354,12 @@ func plan(root string, targets []string, profile, debugInfo string, sanitizers [
 	gen.Profile = normProfile(profile)
 	gen.SanitizeCompile = sanitizer.CompileFlags(sanitizers)
 	gen.SanitizeLink = sanitizer.LinkFlags(sanitizers)
+	if coverage {
+		// `--coverage` is the gcc/clang driver flag for both compile
+		// (-fprofile-arcs -ftest-coverage) and link (-lgcov); .gcda land next to
+		// the objects for gcovr to read after the tests run.
+		gen.CoverageFlags = []string{"--coverage"}
+	}
 	// Debug-info level: --debug-info-level override, else global_config, else the
 	// project's own -g flags (empty here).
 	gen.DebugInfo = debugInfo
@@ -402,7 +413,7 @@ func runNinja(root, buildFile string, extraArgs ...string) error {
 // Build loads the workspace, generates the ninja file for the given targets, and
 // (optionally) runs ninja. It returns the path of the generated ninja file.
 func Build(root string, targets []string, opt Options) (string, error) {
-	_, gen, f, _, err := plan(root, targets, opt.Profile, opt.DebugInfo, opt.Sanitizers)
+	_, gen, f, _, err := plan(root, targets, opt.Profile, opt.DebugInfo, opt.Sanitizers, opt.Coverage)
 	if err != nil {
 		return "", err
 	}
@@ -426,8 +437,8 @@ func Build(root string, targets []string, opt Options) (string, error) {
 // cc_config.hdr_dep_missing_severity (Blade parity), else Warn. Returns the
 // sorted issues and the effective severity so the caller can report and decide
 // whether to fail.
-func CheckHdrs(root string, targets []string, override, profile string, sanitizers []string) ([]hdrcheck.Issue, error) {
-	bd := buildDirFor(profile, sanitizers)
+func CheckHdrs(root string, targets []string, override, profile string, sanitizers []string, coverage bool) ([]hdrcheck.Issue, error) {
+	bd := buildDirFor(profile, sanitizers, coverage)
 	l, g, expanded, err := loadGraph(root, targets, bd)
 	if err != nil {
 		return nil, err
@@ -519,8 +530,8 @@ func DefaultJobs() int {
 // for the requested targets. It plans + writes the ninja file, then asks ninja
 // itself (`ninja -t compdb`) to emit the JSON for the compile rules -- reusing
 // the exact commands ninja would run, so the database always matches the build.
-func CompileDB(root string, targets []string, profile string, sanitizers []string) ([]byte, error) {
-	_, gen, f, _, err := plan(root, targets, profile, "", sanitizers)
+func CompileDB(root string, targets []string, profile string, sanitizers []string, coverage bool) ([]byte, error) {
+	_, gen, f, _, err := plan(root, targets, profile, "", sanitizers, coverage)
 	if err != nil {
 		return nil, err
 	}
@@ -541,6 +552,94 @@ func CompileDB(root string, targets []string, profile string, sanitizers []strin
 	return out, nil
 }
 
+// CoverageReport runs gcovr over a coverage build's .gcno/.gcda to print a
+// C/C++ coverage summary, honoring coverage_config.exclude. Best-effort: it
+// warns (never fails) when gcovr is unavailable, since the raw coverage data is
+// still on disk. Clang's gcov data is read via `llvm-cov gcov`.
+func CoverageReport(root, profile string, sanitizers []string) error {
+	if _, err := exec.LookPath("gcovr"); err != nil {
+		fmt.Fprintln(os.Stderr, "blade: --coverage: gcovr not found; skipping report (raw .gcda are in the build dir)")
+		return nil
+	}
+	buildDir := buildDirFor(profile, sanitizers, true)
+	// coverage_config.exclude: globstar patterns of files to drop from the report.
+	var excludes []string
+	l := loader.New(root)
+	l.BuildDir = buildDir
+	if _, err := os.Stat(filepath.Join(root, "BLADE_ROOT")); err == nil {
+		if err := l.LoadConfigFile(filepath.Join(root, "BLADE_ROOT")); err == nil {
+			blade := bladectx.BuildModule("", buildDir, l.Config)
+			excludes = evalConfigList(l.Config, "coverage_config", "exclude", blade)
+		}
+	}
+	args := []string{"-r", root, buildDir}
+	tc := toolchain.Detect()
+	if ccIsClang(tc.CXX) {
+		// clang's gcov data is read via `llvm-cov gcov`. On macOS the default
+		// compiler is Apple clang; its gcov data must be read by the *matching*
+		// llvm-cov, reachable via xcrun -- a homebrew llvm-cov on PATH is often a
+		// different LLVM version that mis-parses Apple's output. Prefer xcrun there;
+		// elsewhere use llvm-cov from PATH.
+		gcovExec := "llvm-cov gcov"
+		if tc.OS == "darwin" {
+			if _, err := exec.LookPath("xcrun"); err == nil {
+				gcovExec = "xcrun llvm-cov gcov"
+			}
+		}
+		// llvm-cov's gcov output drifts from gcovr's parser (gcc bug 68080): it
+		// emits absurd "suspicious" hit counts. Raise the threshold above them so
+		// they aren't flagged (a clean exit), and warn-not-fail on negative hits.
+		args = append(args, "--gcov-executable", gcovExec,
+			"--gcov-suspicious-hits-threshold=999999999999999",
+			"--gcov-ignore-parse-errors=negative_hits.warn_once_per_file")
+	}
+	for _, e := range excludes {
+		args = append(args, "-e", globToRegex(e))
+	}
+	cmd := exec.Command("gcovr", args...)
+	cmd.Dir = root
+	cmd.Stdout, cmd.Stderr = os.Stdout, os.Stderr
+	if err := cmd.Run(); err != nil {
+		fmt.Fprintf(os.Stderr, "blade: --coverage: gcovr failed: %v\n", err)
+	}
+	return nil
+}
+
+// ccIsClang reports whether the C++ compiler is clang -- robust to it being
+// invoked under a generic name (macOS `c++`/`cc` are Apple clang). Falls back to
+// `<cxx> --version` when the path name doesn't already say "clang".
+func ccIsClang(cxx string) bool {
+	if strings.Contains(cxx, "clang") {
+		return true
+	}
+	out, err := exec.Command(cxx, "--version").Output()
+	return err == nil && strings.Contains(strings.ToLower(string(out)), "clang")
+}
+
+// globToRegex converts a coverage-exclude globstar pattern to a gcovr regex:
+// ** -> .* (across dirs), * -> [^/]*, ? -> ., and dots are escaped.
+func globToRegex(g string) string {
+	var b strings.Builder
+	for i := 0; i < len(g); i++ {
+		switch c := g[i]; c {
+		case '*':
+			if i+1 < len(g) && g[i+1] == '*' {
+				b.WriteString(".*")
+				i++
+			} else {
+				b.WriteString("[^/]*")
+			}
+		case '.':
+			b.WriteString(`\.`)
+		case '?':
+			b.WriteByte('.')
+		default:
+			b.WriteByte(c)
+		}
+	}
+	return b.String()
+}
+
 // TestResult is the outcome of running one cc_test target.
 type TestResult struct {
 	Label  string
@@ -559,7 +658,7 @@ type TestResult struct {
 // opt.FullTest. (Environment variables are deliberately not part of the
 // fingerprint -- blade-go doesn't set test env yet; revisit if it ever does.)
 func Test(root string, targets []string, opt Options, onResult func(TestResult)) ([]TestResult, error) {
-	g, gen, f, expanded, err := plan(root, targets, opt.Profile, opt.DebugInfo, opt.Sanitizers)
+	g, gen, f, expanded, err := plan(root, targets, opt.Profile, opt.DebugInfo, opt.Sanitizers, opt.Coverage)
 	if err != nil {
 		return nil, err
 	}
@@ -721,7 +820,7 @@ func testFingerprint(root, binRel string, n *graph.Node) string {
 // Run builds a single runnable target (cc_binary or cc_test) and executes it,
 // forwarding args and the current stdio; it returns the program's exit code.
 func Run(root, target string, args []string, opt Options) (int, error) {
-	g, gen, f, _, err := plan(root, []string{target}, opt.Profile, opt.DebugInfo, opt.Sanitizers)
+	g, gen, f, _, err := plan(root, []string{target}, opt.Profile, opt.DebugInfo, opt.Sanitizers, opt.Coverage)
 	if err != nil {
 		return 1, err
 	}
@@ -839,11 +938,11 @@ func testdataEntries(root string, n *graph.Node) []testdataEntry {
 // The ninja graph is regenerated for the requested targets so `ninja -t clean`
 // removes exactly their outputs. If nothing has been built yet (no build dir),
 // it is a no-op.
-func Clean(root string, targets []string, profile string, sanitizers []string) error {
-	if _, err := os.Stat(filepath.Join(root, buildDirFor(profile, sanitizers))); os.IsNotExist(err) {
+func Clean(root string, targets []string, profile string, sanitizers []string, coverage bool) error {
+	if _, err := os.Stat(filepath.Join(root, buildDirFor(profile, sanitizers, coverage))); os.IsNotExist(err) {
 		return nil // nothing built, nothing to clean
 	}
-	_, gen, f, _, err := plan(root, targets, profile, "", sanitizers)
+	_, gen, f, _, err := plan(root, targets, profile, "", sanitizers, coverage)
 	if err != nil {
 		return err
 	}
@@ -864,7 +963,7 @@ type QueryResult struct {
 // its transitive dependencies (dependents=false) or transitive dependents
 // (dependents=true, the reverse closure).
 func Query(root string, targets []string, dependents bool) ([]QueryResult, error) {
-	_, g, _, err := loadGraph(root, []string{"//..."}, buildDirFor("release", nil)) // deps are profile-independent
+	_, g, _, err := loadGraph(root, []string{"//..."}, buildDirFor("release", nil, false)) // deps are profile-independent
 	if err != nil {
 		return nil, err
 	}

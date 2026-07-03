@@ -144,6 +144,7 @@ blade test --sanitizer=address //flare/base/...      # AddressSanitizer build+te
 | `--no-build`, `--stop-after {load,analyze,generate}` | generate `build.ninja`, don't run ninja |
 | `-p, --profile {release,debug}` | build profile: release = `-O2 -DNDEBUG`, debug = `-O0 -fstack-protector` (asserts live); outputs go to `build_<profile>` |
 | `--sanitizer <set>` | build/test under sanitizers (`address,thread,undefined,leak,memory`); outputs go to `build_<profile>_<tag>` (e.g. `build_release_asan`) |
+| `--coverage` | instrument for gcov coverage (`build_<profile>_coverage`); `blade test --coverage` reports via gcovr |
 | `--hdr-check {off,warn,error}` | header inclusion-dependency check (default: project `cc_config`) |
 
 Targets accept patterns: `//pkg:name`, `//pkg:*` (a package), `//pkg/...`
