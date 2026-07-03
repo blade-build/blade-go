@@ -125,7 +125,8 @@ same `blade build|test [flags] targets...` shape, GNU long/short flags:
 ```sh
 blade build -j8 -k -p release //flare/rpc:rpc      # honored: -j / -k / -p
 blade build --no-build //flare/...                 # front-end only (no ninja)
-blade test -k //flare/base/...                      # run every cc_test (skips unchanged, passed ones)
+blade test -k //flare/base/...                      # run every cc_test (parallel; skips unchanged passed ones)
+blade test --test-jobs 4 //flare/...                # cap test parallelism (default = CPUs)
 blade test --full-test //flare/base/...             # force re-run, ignoring the cache
 blade run //flare/example/rpc:server -- --port 80   # build + run; args after -- go to it
 blade clean                                         # remove the build output dir

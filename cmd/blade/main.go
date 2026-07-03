@@ -152,6 +152,7 @@ func newBuildCmd() *cobra.Command {
 func newTestCmd() *cobra.Command {
 	var bf buildFlags
 	var fullTest bool
+	var testJobs int
 	c := &cobra.Command{
 		Use:   "test [flags] <target>...",
 		Short: "Build and run the cc_test targets in the given patterns",
@@ -178,7 +179,7 @@ func newTestCmd() *cobra.Command {
 					fmt.Print(r.Output)
 				}
 			}
-			results, err := build.Test(root, targets, build.Options{NinjaArgs: nargs, FullTest: fullTest}, print)
+			results, err := build.Test(root, targets, build.Options{NinjaArgs: nargs, FullTest: fullTest, TestJobs: testJobs}, print)
 			if err != nil {
 				return err
 			}
@@ -207,6 +208,7 @@ func newTestCmd() *cobra.Command {
 	}
 	bf.register(c)
 	c.Flags().BoolVar(&fullTest, "full-test", false, "re-run every test, ignoring the incremental cache")
+	c.Flags().IntVar(&testJobs, "test-jobs", 0, "parallel test workers (0 = number of CPUs; exclusive tests always run serially)")
 	return c
 }
 

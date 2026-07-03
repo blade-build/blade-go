@@ -7,6 +7,7 @@ import (
 	"reflect"
 	"sort"
 	"strings"
+	"sync"
 	"testing"
 
 	"github.com/blade-build/blade-go/internal/graph"
@@ -378,9 +379,11 @@ func TestRunsCcTests(t *testing.T) {
 		"BLADE_ROOT": `cc_config()`,
 		"t/pass.cc":  "int main(){ return 0; }\n",
 		"t/fail.cc":  "int main(){ return 1; }\n",
+		"t/excl.cc":  "int main(){ return 0; }\n",
 		"t/BUILD": `
 cc_test(name = 'pass', srcs = ['pass.cc'])
 cc_test(name = 'fail', srcs = ['fail.cc'])
+cc_test(name = 'excl', srcs = ['excl.cc'], exclusive = True)
 `,
 	}
 	for rel, content := range files {
@@ -392,19 +395,21 @@ cc_test(name = 'fail', srcs = ['fail.cc'])
 			t.Fatal(err)
 		}
 	}
-	// onResult must be called once per test as it finishes (streaming), before
-	// Test returns -- so a large suite shows progress instead of looking hung.
+	// onResult is called once per test as it finishes (streaming). The exclusive
+	// test runs too (in the serial batch), so all three appear. Guard the
+	// callback with a mutex: results arrive from concurrent workers.
+	var smu sync.Mutex
 	var streamed []string
-	results, err := Test(root, []string{"//t:pass", "//t:fail"}, Options{},
-		func(r TestResult) { streamed = append(streamed, r.Label) })
+	results, err := Test(root, []string{"//t:pass", "//t:fail", "//t:excl"}, Options{},
+		func(r TestResult) { smu.Lock(); streamed = append(streamed, r.Label); smu.Unlock() })
 	if err != nil {
 		t.Fatal(err)
 	}
-	if len(results) != 2 {
-		t.Fatalf("got %d results, want 2", len(results))
+	if len(results) != 3 {
+		t.Fatalf("got %d results, want 3", len(results))
 	}
-	if len(streamed) != 2 {
-		t.Errorf("onResult called %d times, want 2 (results must stream)", len(streamed))
+	if len(streamed) != 3 {
+		t.Errorf("onResult called %d times, want 3 (results must stream)", len(streamed))
 	}
 	byLabel := map[string]bool{}
 	for _, r := range results {
@@ -415,6 +420,9 @@ cc_test(name = 'fail', srcs = ['fail.cc'])
 	}
 	if byLabel["//t:fail"] {
 		t.Error("//t:fail should fail (exit 1)")
+	}
+	if !byLabel["//t:excl"] {
+		t.Error("//t:excl (exclusive) should run and pass")
 	}
 }
 
