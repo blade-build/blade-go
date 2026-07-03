@@ -332,15 +332,17 @@ func newQueryCmd() *cobra.Command {
 
 func newCleanCmd() *cobra.Command {
 	c := &cobra.Command{
-		Use:   "clean",
-		Short: "Remove the build output directory",
-		Args:  cobra.NoArgs,
-		RunE: func(cmd *cobra.Command, args []string) error {
+		Use:   "clean [targets...]",
+		Short: "Remove build outputs (ninja -t clean); keeps the vcpkg tree",
+		RunE: func(cmd *cobra.Command, targets []string) error {
 			root, err := workspaceRoot()
 			if err != nil {
 				return err
 			}
-			if err := build.Clean(root); err != nil {
+			if len(targets) == 0 {
+				targets = []string{"//..."} // clean everything by default
+			}
+			if err := build.Clean(root, targets); err != nil {
 				return err
 			}
 			fmt.Println("blade: cleaned")
