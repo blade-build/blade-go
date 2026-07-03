@@ -558,10 +558,16 @@ func toStringSlice(v starlark.Value) []string {
 	return out
 }
 
+// callerPos returns the "file:line:col" of the BUILD/config call site. The
+// innermost frame while a rule runs is the Go builtin itself (Pos filename
+// "<builtin>"), so walk outward to the first frame with a real source file --
+// the BUILD line where the rule was invoked.
 func callerPos(thread *starlark.Thread) string {
 	cs := thread.CallStack()
-	if len(cs) > 0 {
-		return cs[len(cs)-1].Pos.String()
+	for i := len(cs) - 1; i >= 0; i-- {
+		if fn := cs[i].Pos.Filename(); fn != "" && fn != "<builtin>" {
+			return cs[i].Pos.String()
+		}
 	}
 	return ""
 }

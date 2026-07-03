@@ -158,6 +158,15 @@ header), and **undeclared** (owned by no cc target). Severity defaults to the
 project's `cc_config.hdr_dep_missing_severity`; `--hdr-check {off,warn,error}`
 overrides it.
 
+Diagnostics are GCC-format (`file:line:col: severity: message`), so editors and
+terminals make both the offending `#include` and the fix-it `BUILD` line
+clickable:
+
+```text
+flare/fiber/detail/scheduling_group_test.cc:26:1: warning: 'flare/base/internal/annotation.h' is included here but //flare/base/internal:annotation is not in the deps of //flare/fiber/detail:scheduling_group_test [hdr-check]
+flare/fiber/detail/BUILD:144:8: note: add //flare/base/internal:annotation to deps
+```
+
 The mechanism differs from Python Blade (which wraps every compile with `-H` to
 record an inclusion stack): blade-go reads the header closure ninja already
 recorded (`ninja -t deps`) and intersects it with a regex scan of each source's

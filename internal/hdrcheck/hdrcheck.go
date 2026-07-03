@@ -22,6 +22,7 @@ package hdrcheck
 import (
 	"bufio"
 	"bytes"
+	"fmt"
 	"os"
 	"os/exec"
 	"path"
@@ -69,11 +70,14 @@ const (
 
 // Issue is one inclusion-dependency violation.
 type Issue struct {
-	Target string   // the including target's label ("//pkg:name")
-	Source string   // the src/hdr file (workspace-relative) with the bad #include
-	Header string   // the offending header (workspace-relative)
-	Kind   Kind     // why it is bad
-	Owners []string // labels that own Header (for MissingDep / PrivateHeader)
+	Target    string   // the including target's label ("//pkg:name")
+	TargetPos string   // the target's BUILD location "pkg/BUILD:line:col" (for the fix-it note)
+	Source    string   // the src/hdr file (workspace-relative) with the bad #include
+	Line      int      // 1-based line of the offending #include in Source
+	Col       int      // 1-based column of the '#' in Source
+	Header    string   // the offending header (workspace-relative)
+	Kind      Kind     // why it is bad
+	Owners    []string // labels that own Header (for MissingDep / PrivateHeader)
 }
 
 // ccTypes are the target rules whose srcs/hdrs participate in the check.
@@ -218,7 +222,16 @@ func checkFile(issues []Issue, n *graph.Node, f, pkg, lib string,
 	if len(closure) == 0 {
 		return issues // not built (no depfile) -> can't check this file
 	}
-	for _, hdr := range directHeaders(path.Join(opt.Root, srcPath), pkg, closure) {
+	targetPos := relTo(opt.Root, n.Target.Pos)
+	mk := func(hdr string, dh directHdr, kind Kind, owners []string) Issue {
+		return Issue{
+			Target: lib, TargetPos: targetPos,
+			Source: srcPath, Line: dh.line, Col: dh.col,
+			Header: hdr, Kind: kind, Owners: owners,
+		}
+	}
+	for _, dh := range directHeaders(path.Join(opt.Root, srcPath), pkg, closure) {
+		hdr := dh.header
 		if declared[hdr] { // own or a direct dep's header
 			continue
 		}
@@ -227,44 +240,74 @@ func checkFile(issues []Issue, n *graph.Node, f, pkg, lib string,
 		}
 		if owners := public[hdr]; len(owners) > 0 {
 			if !anyIn(owners, deps) {
-				issues = append(issues, Issue{lib, srcPath, hdr, MissingDep, sortedKeys(owners)})
+				issues = append(issues, mk(hdr, dh, MissingDep, sortedKeys(owners)))
 			}
 			continue
 		}
 		if powners := private[hdr]; len(powners) > 0 && !powners[lib] {
-			issues = append(issues, Issue{lib, srcPath, hdr, PrivateHeader, sortedKeys(powners)})
+			issues = append(issues, mk(hdr, dh, PrivateHeader, sortedKeys(powners)))
 			continue
 		}
 		if !opt.AllowUndec[hdr] {
-			issues = append(issues, Issue{lib, srcPath, hdr, Undeclared, nil})
+			issues = append(issues, mk(hdr, dh, Undeclared, nil))
 		}
 	}
 	return issues
 }
 
+// relTo strips a leading "root/" from an absolute location so it prints as a
+// workspace-relative, clickable path (Blade's BUILD Pos is usually already
+// relative; this is a no-op then).
+func relTo(root, loc string) string {
+	if root != "" && strings.HasPrefix(loc, root+"/") {
+		return loc[len(root)+1:]
+	}
+	return loc
+}
+
+// directHdr is a directly-included header and the source line/column of its
+// #include directive (column = the position of the '#').
+type directHdr struct {
+	header string
+	line   int
+	col    int
+}
+
 // directHeaders returns the workspace-relative headers that file (abs path)
-// directly #includes AND the compiler actually used (present in closure). Each
-// literal include spelling is resolved the way the compiler would: against the
-// workspace root (-I.) and against the including file's own directory (implicit
-// for `"..."` includes). System/vcpkg headers are absolute in the closure, so a
-// relative spelling never matches them and they drop out here.
-func directHeaders(absFile, pkg string, closure map[string]bool) []string {
-	data, err := os.ReadFile(absFile)
+// directly #includes AND the compiler actually used (present in closure), each
+// with the 1-based line of its #include directive. Each literal include spelling
+// is resolved the way the compiler would: against the workspace root (-I.) and
+// against the including file's own directory (implicit for `"..."` includes).
+// System/vcpkg headers are absolute in the closure, so a relative spelling never
+// matches them and they drop out here.
+func directHeaders(absFile, pkg string, closure map[string]bool) []directHdr {
+	f, err := os.Open(absFile)
 	if err != nil {
 		return nil
 	}
-	var out []string
+	defer f.Close()
+	var out []directHdr
 	seen := map[string]bool{}
-	for _, m := range includeRE.FindAllStringSubmatch(string(data), -1) {
+	sc := bufio.NewScanner(f)
+	sc.Buffer(make([]byte, 0, 64*1024), 4*1024*1024)
+	line := 0
+	for sc.Scan() {
+		line++
+		text := sc.Text()
+		m := includeRE.FindStringSubmatch(text)
+		if m == nil {
+			continue
+		}
 		spell := m[1] // quoted form
 		if spell == "" {
 			spell = m[2] // angle form (project headers are sometimes spelled <pkg/x.h>)
 		}
 		spell = path.Clean(spell)
+		col := strings.IndexByte(text, '#') + 1 // 1-based column of the '#'
 		for _, cand := range [2]string{spell, path.Join(pkg, spell)} {
 			if closure[cand] && !seen[cand] {
 				seen[cand] = true
-				out = append(out, cand)
+				out = append(out, directHdr{cand, line, col})
 			}
 		}
 	}
@@ -289,18 +332,39 @@ func sortedKeys(m map[string]bool) []string {
 	return ks
 }
 
-// Format renders one issue as a single human-readable line (no trailing newline).
-func (i Issue) Format() string {
+// Format renders the issue as GCC-style diagnostics (no trailing newline): a
+//
+//	source:line:col: <severity>: <message> [hdr-check]
+//
+// line pointing at the offending #include, followed by a
+//
+//	BUILD:line:col: note: <fix-it>
+//
+// line pointing at the target's stanza to edit. Both locations are clickable in
+// editors/terminals that recognize the GCC format. `severity` is "warning" or
+// "error".
+func (i Issue) Format(severity string) string {
+	loc := fmt.Sprintf("%s:%d:%d", i.Source, i.Line, i.Col)
+	owners := strings.Join(i.Owners, " or ")
+	var msg, note string
 	switch i.Kind {
 	case MissingDep:
-		return i.Source + ": includes \"" + i.Header + "\" (belongs to " +
-			strings.Join(i.Owners, " or ") + ") but " + i.Target + " does not declare it in deps"
+		msg = fmt.Sprintf("%s: %s: '%s' is included here but %s is not in the deps of %s [hdr-check]",
+			loc, severity, i.Header, owners, i.Target)
+		note = "note: add " + owners + " to deps"
 	case PrivateHeader:
-		return i.Source + ": includes \"" + i.Header + "\", a private header of " +
-			strings.Join(i.Owners, " or ")
+		msg = fmt.Sprintf("%s: %s: '%s' is a private header of %s [hdr-check]",
+			loc, severity, i.Header, owners)
+		note = "note: it is not part of " + owners + "'s public interface"
 	default: // Undeclared
-		return i.Source + ": includes \"" + i.Header + "\", which is not declared in any cc target"
+		msg = fmt.Sprintf("%s: %s: '%s' is not declared in any cc target [hdr-check]",
+			loc, severity, i.Header)
+		note = "note: declare it in the hdrs of its owning library, or in this target"
 	}
+	if i.TargetPos != "" {
+		return msg + "\n" + i.TargetPos + ": " + note
+	}
+	return msg
 }
 
 // SeverityFromBlade maps Blade's cc_config.hdr_dep_missing_severity values to a
