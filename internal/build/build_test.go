@@ -736,3 +736,33 @@ func TestTestFingerprintAndHistory(t *testing.T) {
 		t.Errorf("history round-trip lost data: %+v", got)
 	}
 }
+
+func TestHeaderCompilesWithXCpp(t *testing.T) {
+	// A .h in srcs (self-sufficiency check) compiles via the cxx_header rule with
+	// -x c++, so clang++ doesn't warn "treating 'c-header' as 'c++-header'".
+	root := t.TempDir()
+	files := map[string]string{
+		"BLADE_ROOT": `cc_config()`,
+		"p/BUILD":    `cc_library(name = 'p', srcs = ['a.cc', 'h.h'])`,
+	}
+	for rel, content := range files {
+		fp := filepath.Join(root, rel)
+		if err := os.MkdirAll(filepath.Dir(fp), 0o755); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(fp, []byte(content), 0o644); err != nil {
+			t.Fatal(err)
+		}
+	}
+	ninjaFile, err := Build(root, []string{"//p:p"}, Options{RunNinja: false})
+	if err != nil {
+		t.Fatal(err)
+	}
+	out := string(mustRead(t, ninjaFile))
+	if !strings.Contains(out, "-x c++ -c") {
+		t.Errorf("cxx_header rule missing -x c++:\n%s", out)
+	}
+	if !strings.Contains(out, "h.h.o: cxx_header ") {
+		t.Errorf("header not compiled via cxx_header:\n%s", out)
+	}
+}

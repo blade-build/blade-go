@@ -188,6 +188,13 @@ func (gen *Generator) emitRules(f *ninja.File) {
 		Command: "${cxx} -MMD -MF ${out}.d ${cppflags} ${cxxflags} ${defs} ${includes} -c ${in} -o ${out}",
 	})
 	f.AddRule(ninja.Rule{
+		// A .h compiled standalone (header self-sufficiency check): -x c++ tells
+		// clang++ it's a C++ header, avoiding the deprecated "treating 'c-header'
+		// input as 'c++-header'" warning.
+		Name: "cxx_header", Description: "CXX ${out}", Depfile: "${out}.d", Deps: "gcc",
+		Command: "${cxx} -MMD -MF ${out}.d ${cppflags} ${cxxflags} ${defs} ${includes} -x c++ -c ${in} -o ${out}",
+	})
+	f.AddRule(ninja.Rule{
 		Name: "ar", Description: "AR ${out}",
 		Command: "rm -f ${out} && ${ar} rcs ${out} ${in}",
 	})
@@ -400,8 +407,13 @@ func (gen *Generator) emitCompiles(f *ninja.File, n *graph.Node, implicitHdrs []
 		rule := "cc"
 		// Headers compile standalone with the target's language, which for cc_*
 		// is C++ (they pull in <memory>); only a bare .c stays on the C compiler.
+		// A header uses the `cxx_header` rule (explicit -x c++) so clang++ doesn't
+		// warn about "treating 'c-header' input as 'c++-header'".
 		header := isHeader(src)
-		if isCXXSource(src) || header {
+		switch {
+		case header:
+			rule = "cxx_header"
+		case isCXXSource(src):
 			rule = "cxx"
 		}
 		vars := map[string]string{"includes": inc}
