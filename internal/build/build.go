@@ -392,7 +392,13 @@ func Test(root string, targets []string, opt Options, onResult func(TestResult))
 		if node == nil || node.Target.Type != "cc_test" {
 			continue
 		}
-		out, runErr := exec.Command(filepath.Join(root, gen.BinPath(node))).CombinedOutput()
+		binRel := gen.BinPath(node)
+		runtimeDir := stageTestdata(root, node, binRel)
+		cmd := exec.Command(filepath.Join(root, binRel))
+		if runtimeDir != "" {
+			cmd.Dir = runtimeDir // the test reads its testdata relative to here
+		}
+		out, runErr := cmd.CombinedOutput()
 		res := TestResult{Label: node.Label(), Passed: runErr == nil, Output: string(out)}
 		if onResult != nil {
 			onResult(res)
@@ -427,8 +433,12 @@ func Run(root, target string, args []string, opt Options) (int, error) {
 	if t := node.Target.Type; t != "cc_binary" && t != "cc_test" {
 		return 1, fmt.Errorf("%s is a %s, not a runnable binary", target, t)
 	}
-	cmd := exec.Command(filepath.Join(root, gen.BinPath(node)), args...)
+	binRel := gen.BinPath(node)
+	cmd := exec.Command(filepath.Join(root, binRel), args...)
 	cmd.Stdin, cmd.Stdout, cmd.Stderr = os.Stdin, os.Stdout, os.Stderr
+	if dir := stageTestdata(root, node, binRel); dir != "" {
+		cmd.Dir = dir
+	}
 	if err := cmd.Run(); err != nil {
 		if exit, ok := err.(*exec.ExitError); ok {
 			return exit.ExitCode(), nil // propagate the program's exit code
@@ -436,6 +446,53 @@ func Run(root, target string, args []string, opt Options) (int, error) {
 		return 1, err
 	}
 	return 0, nil
+}
+
+// stageTestdata materializes a cc_test's `testdata` next to the test binary and
+// returns that dir (the test's runtime cwd), or "" if the target has no
+// testdata. Each entry is a path staged at the same relative name, or a
+// (src, dst) tuple staging src as dst -- e.g. ('testdata', 'conf') makes the
+// package's testdata/ dir available as conf/ so the test reads "conf/x.yaml".
+// blade runs tests from this dir; mirroring that lets data-driven tests find
+// their files.
+func stageTestdata(root string, n *graph.Node, binRel string) string {
+	raw, ok := n.Target.Attrs["testdata"].([]any)
+	if !ok || len(raw) == 0 {
+		return ""
+	}
+	runtimeDir := filepath.Join(root, filepath.Dir(binRel)) // build_dir/<pkg>
+	pkg := filepath.FromSlash(n.Target.Package)
+	for _, e := range raw {
+		src, dst := "", ""
+		switch v := e.(type) {
+		case string:
+			src, dst = v, v
+		case []any:
+			if len(v) >= 1 {
+				src, _ = v[0].(string)
+				dst = src
+			}
+			if len(v) >= 2 {
+				dst, _ = v[1].(string)
+			}
+		}
+		if src == "" || strings.Contains(src, "..") {
+			continue
+		}
+		var srcPath string
+		if rest, ok := strings.CutPrefix(src, "//"); ok {
+			srcPath = filepath.Join(root, filepath.FromSlash(rest))
+		} else {
+			srcPath = filepath.Join(root, pkg, filepath.FromSlash(src))
+		}
+		dstPath := filepath.Join(runtimeDir, filepath.FromSlash(dst))
+		if err := os.MkdirAll(filepath.Dir(dstPath), 0o755); err != nil {
+			continue
+		}
+		os.RemoveAll(dstPath)            // replace any stale staging
+		_ = os.Symlink(srcPath, dstPath) // absolute symlink to the source data
+	}
+	return runtimeDir
 }
 
 // Clean removes the build output directory.
