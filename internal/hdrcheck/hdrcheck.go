@@ -86,6 +86,7 @@ type Issue struct {
 // ccTypes are the target rules whose srcs/hdrs participate in the check.
 var ccTypes = map[string]bool{
 	"cc_library": true, "cc_binary": true, "cc_test": true, "cc_plugin": true,
+	"prebuilt_cc_library": true, // owns its hdrs so consumers' includes resolve
 }
 
 // ClosureSource yields the set of paths the compiler actually traversed for a

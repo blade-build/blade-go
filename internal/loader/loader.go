@@ -27,7 +27,7 @@ import (
 var ruleNames = []string{
 	"cc_library", "cc_binary", "cc_test", "cc_benchmark",
 	"proto_library", "resource_library", "gen_rule",
-	"foreign_cc_library",
+	"foreign_cc_library", "prebuilt_cc_library",
 }
 
 // thread-local keys for the currently-executing BUILD file's context.

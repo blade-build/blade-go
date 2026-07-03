@@ -336,6 +336,7 @@ func plan(root string, targets []string, profile, debugInfo string) (*graph.Grap
 	}
 	tm.mark("load+graph")
 	gen := cc.New(toolchain.Detect())
+	gen.Root = root
 	gen.BuildDir = buildDirFor(profile)
 	gen.Profile = normProfile(profile)
 	// Debug-info level: --debug-info-level override, else global_config, else the
