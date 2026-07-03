@@ -27,6 +27,10 @@ type Generator struct {
 	Cppflags         []string         // cc_config flags for all C-family compiles
 	Cxxflags         []string         // cc_config flags for C++ compiles only
 	Cflags           []string         // cc_config flags for C compiles only
+	CWarnings        []string         // cc_config warnings for C compiles (not generated code)
+	CxxWarnings      []string         // cc_config warnings for C++ compiles (not generated code)
+	Linkflags        []string         // cc_config link flags (ldflags)
+	Optimize         []string         // cc_config optimize flags (override the release default)
 	TestVcpkgs       []label.VcpkgDep // cc_test_config gtest libs that resolve to vcpkg
 	TestSyslibs      []string         // cc_test_config gtest libs that are #-syslibs
 	BenchmarkVcpkgs  []label.VcpkgDep // cc_config benchmark libs that resolve to vcpkg
@@ -58,7 +62,12 @@ func (gen *Generator) profileFlags() []string {
 	if gen.Profile == "debug" {
 		return []string{"-O0", "-fstack-protector"}
 	}
-	return []string{"-O2", "-DNDEBUG"} // release (default)
+	// Release: NDEBUG + optimize. cc_config.optimize overrides the -O2 default.
+	opt := gen.Optimize
+	if len(opt) == 0 {
+		opt = []string{"-O2"}
+	}
+	return append(append([]string{}, opt...), "-DNDEBUG")
 }
 
 // debugInfoFlags maps --debug-info-level / global_config.debug_info_level to a
@@ -113,6 +122,12 @@ func (gen *Generator) Generate(g *graph.Graph) (*ninja.File, error) {
 	f.SetVar("cppflags", strings.Join(cpp, " "))
 	f.SetVar("cxxflags", strings.Join(gen.Cxxflags, " "))
 	f.SetVar("cflags", strings.Join(gen.Cflags, " "))
+	// Warnings are a separate var so generated code (proto/resource) can opt out
+	// by overriding it to empty -- Blade applies warnings only to hand-written
+	// sources, never to protoc/codegen output. ldflags carries cc_config.linkflags.
+	f.SetVar("c_warnings", strings.Join(gen.CWarnings, " "))
+	f.SetVar("cxx_warnings", strings.Join(gen.CxxWarnings, " "))
+	f.SetVar("ldflags", strings.Join(gen.Linkflags, " "))
 	gen.emitRules(f)
 
 	libOf := map[*graph.Node]string{}
@@ -217,18 +232,18 @@ func (gen *Generator) Generate(g *graph.Graph) (*ninja.File, error) {
 func (gen *Generator) emitRules(f *ninja.File) {
 	f.AddRule(ninja.Rule{
 		Name: "cc", Description: "CC ${out}", Depfile: "${out}.d", Deps: "gcc",
-		Command: "${cc} -MMD -MF ${out}.d ${cppflags} ${cflags} ${defs} ${includes} -c ${in} -o ${out}",
+		Command: "${cc} -MMD -MF ${out}.d ${cppflags} ${cflags} ${c_warnings} ${defs} ${includes} -c ${in} -o ${out}",
 	})
 	f.AddRule(ninja.Rule{
 		Name: "cxx", Description: "CXX ${out}", Depfile: "${out}.d", Deps: "gcc",
-		Command: "${cxx} -MMD -MF ${out}.d ${cppflags} ${cxxflags} ${defs} ${includes} -c ${in} -o ${out}",
+		Command: "${cxx} -MMD -MF ${out}.d ${cppflags} ${cxxflags} ${cxx_warnings} ${defs} ${includes} -c ${in} -o ${out}",
 	})
 	f.AddRule(ninja.Rule{
 		// A .h compiled standalone (header self-sufficiency check): -x c++ tells
 		// clang++ it's a C++ header, avoiding the deprecated "treating 'c-header'
 		// input as 'c++-header'" warning.
 		Name: "cxx_header", Description: "CXX ${out}", Depfile: "${out}.d", Deps: "gcc",
-		Command: "${cxx} -MMD -MF ${out}.d ${cppflags} ${cxxflags} ${defs} ${includes} -x c++ -c ${in} -o ${out}",
+		Command: "${cxx} -MMD -MF ${out}.d ${cppflags} ${cxxflags} ${cxx_warnings} ${defs} ${includes} -x c++ -c ${in} -o ${out}",
 	})
 	f.AddRule(ninja.Rule{
 		Name: "ar", Description: "AR ${out}",
@@ -288,7 +303,8 @@ func (gen *Generator) emitResourceLibrary(f *ninja.File, n *graph.Node) (lib str
 		obj := cf + gen.Tc.ObjSuffix()
 		f.AddBuild(ninja.Build{
 			Outputs: []string{obj}, Rule: "cc", Inputs: []string{cf},
-			Implicit: []string{indexH}, Vars: map[string]string{"includes": inc},
+			// Generated resource C isn't warning-clean; suppress warnings.
+			Implicit: []string{indexH}, Vars: map[string]string{"includes": inc, "c_warnings": ""},
 		})
 		objs = append(objs, obj)
 	}
@@ -399,7 +415,8 @@ func (gen *Generator) emitProto(f *ninja.File, n *graph.Node) (lib string, genHd
 		f.AddBuild(ninja.Build{
 			Outputs: []string{obj}, Rule: "cxx", Inputs: []string{pbcc},
 			Implicit: []string{pbh},
-			Vars:     map[string]string{"includes": inc},
+			// protoc output isn't warning-clean; suppress warnings like Blade.
+			Vars: map[string]string{"includes": inc, "cxx_warnings": ""},
 		})
 		objs = append(objs, obj)
 		genHdrs = append(genHdrs, pbh)
@@ -442,6 +459,9 @@ func (gen *Generator) foreignInfo(n *graph.Node, genFilesOf map[*graph.Node]map[
 func (gen *Generator) emitCompiles(f *ninja.File, n *graph.Node, implicitHdrs []string, genFiles map[string]string) (objs, checkObjs []string) {
 	inc := gen.includes(n)
 	defs := defineFlags(n) // per-target preprocessor defines (cc_test variants)
+	// A target with `warning = 'no'` (flare's thirdparty source builds like blake3)
+	// opts out of the project's cc_config warnings -- override the vars to empty.
+	noWarn := n.Target.AttrString("warning") == "no"
 	for _, src := range n.Target.AttrStrings("srcs") {
 		srcPath := path.Join(n.Target.Package, src)
 		if gp, ok := genFiles[src]; ok {
@@ -463,6 +483,14 @@ func (gen *Generator) emitCompiles(f *ninja.File, n *graph.Node, implicitHdrs []
 		vars := map[string]string{"includes": inc}
 		if defs != "" {
 			vars["defs"] = defs
+		}
+		// Suppress warnings for `warning = 'no'` targets and for the standalone
+		// header self-sufficiency check (a header may carry an intentional
+		// `#warning` deprecation notice that -Werror would turn fatal; the real
+		// .cc compile that includes it still gets the warnings).
+		if noWarn || header {
+			vars["c_warnings"] = ""
+			vars["cxx_warnings"] = ""
 		}
 		f.AddBuild(ninja.Build{
 			Outputs: []string{obj}, Rule: rule, Inputs: []string{srcPath},
@@ -568,19 +596,30 @@ func (gen *Generator) includes(n *graph.Node) string {
 	if len(gen.ProtobufVcpkgs) > 0 && (n.Target.Type == "proto_library" || gen.hasProtoInClosure(n)) {
 		needVcpkg = true // protobuf headers (for generated .pb.cc) live in the vcpkg tree
 	}
+	// vcpkg/thirdparty include dirs go through -isystem, not -I: they are external
+	// headers, so their own warnings must not fire under the project's -Werror
+	// (e.g. fmt's MSVC `#pragma warning` -> -Wunknown-pragmas). Matches Blade.
+	var sysDirs []string
 	if inc := gen.Vcpkg.IncludeDir(); inc != "" && needVcpkg {
-		dirs = append(dirs, inc)
+		sysDirs = append(sysDirs, inc)
 		// include_prefix ports (zlib, snappy, ...) resolve "prefix/hdr" here.
 		if gen.Vcpkg.PrefixRoot != "" {
-			dirs = append(dirs, gen.Vcpkg.PrefixRoot)
+			sysDirs = append(sysDirs, gen.Vcpkg.PrefixRoot)
 		}
 	}
 	var b strings.Builder
-	for i, d := range dirs {
-		if i > 0 {
+	for _, d := range dirs {
+		if b.Len() > 0 {
 			b.WriteByte(' ')
 		}
 		b.WriteString("-I")
+		b.WriteString(d)
+	}
+	for _, d := range sysDirs {
+		if b.Len() > 0 {
+			b.WriteByte(' ')
+		}
+		b.WriteString("-isystem ")
 		b.WriteString(d)
 	}
 	return b.String()

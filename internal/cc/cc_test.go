@@ -167,11 +167,12 @@ func TestEndToEndProto(t *testing.T) {
 	// cflags go through the generator's Cxxflags; ldflags are prepended below.
 	cflags, lflags := pkgConfig(t, "protobuf")
 	gen.Cxxflags = append([]string{"-std=c++17"}, strings.Fields(cflags)...)
+	gen.Linkflags = strings.Fields(lflags) // protobuf runtime libs -> the ldflags var
 	f, err := gen.Generate(g)
 	if err != nil {
 		t.Fatal(err)
 	}
-	ninjaText := "ldflags = " + lflags + "\n" + f.String()
+	ninjaText := f.String()
 	if err := os.WriteFile(filepath.Join(root, "build.ninja"), []byte(ninjaText), 0o644); err != nil {
 		t.Fatal(err)
 	}
@@ -291,6 +292,27 @@ cc_binary(name = 'app', srcs = ['hello.cc'], deps = [':mk'])
 	}
 }
 
+// cc_config warnings are emitted as a top-level ninja var applied to compiles;
+// a `warning = 'no'` target overrides that var to empty for its own edges.
+func TestWarningsWiring(t *testing.T) {
+	g, _ := buildGraph(t, map[string]string{
+		"a/BUILD": `cc_library(name = 'a', srcs = ['a.cc'], warning = 'no', visibility = ['PUBLIC'])`,
+	}, "//a:a")
+	gen := New(toolchain.Detect())
+	gen.CxxWarnings = []string{"-Werror", "-Wall"}
+	f, err := gen.Generate(g)
+	if err != nil {
+		t.Fatal(err)
+	}
+	out := f.String()
+	if !strings.Contains(out, "cxx_warnings = -Werror -Wall\n") {
+		t.Errorf("top-level cxx_warnings not wired:\n%s", out)
+	}
+	if !strings.Contains(out, "  cxx_warnings = \n") {
+		t.Errorf("warning='no' did not override cxx_warnings to empty:\n%s", out)
+	}
+}
+
 func TestVcpkgLinkFlags(t *testing.T) {
 	vroot := t.TempDir()
 	installed := filepath.Join(vroot, "installed", "x64-linux")
@@ -310,8 +332,8 @@ func TestVcpkgLinkFlags(t *testing.T) {
 		t.Fatal(err)
 	}
 	out := f.String()
-	if !strings.Contains(out, "-I"+filepath.Join(installed, "include")) {
-		t.Errorf("compile missing vcpkg include dir\n%s", out)
+	if !strings.Contains(out, "-isystem "+filepath.Join(installed, "include")) {
+		t.Errorf("compile missing vcpkg include dir (as -isystem)\n%s", out)
 	}
 	if !strings.Contains(out, filepath.Join(installed, "lib", "libfoo.a")) {
 		t.Errorf("link missing vcpkg archive\n%s", out)
