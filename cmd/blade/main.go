@@ -170,12 +170,12 @@ func runHdrCheck(root string, targets []string, override string) error {
 	if len(issues) == 0 || sev == hdrcheck.Off {
 		return nil
 	}
-	label := "warning"
+	sevWord := "warning"
 	if sev == hdrcheck.Error {
-		label = "error"
+		sevWord = "error"
 	}
 	for _, is := range issues {
-		fmt.Fprintf(os.Stderr, "blade: hdr-check %s: %s\n", label, is.Format())
+		fmt.Fprintln(os.Stderr, is.Format(sevWord))
 	}
 	fmt.Fprintf(os.Stderr, "blade: hdr-check found %d issue(s)\n", len(issues))
 	if sev == hdrcheck.Error {

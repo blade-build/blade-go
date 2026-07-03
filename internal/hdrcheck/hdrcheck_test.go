@@ -60,8 +60,10 @@ func TestCheckClassifiesInclusions(t *testing.T) {
 	})
 
 	got := map[string]Kind{}
+	line := map[string]int{}
 	for _, is := range issues {
 		got[is.Header] = is.Kind
+		line[is.Header] = is.Line
 	}
 	want := map[string]Kind{
 		"d/d.h":      MissingDep,
@@ -74,6 +76,13 @@ func TestCheckClassifiesInclusions(t *testing.T) {
 	for h, k := range want {
 		if got[h] != k {
 			t.Errorf("header %s: got kind %v, want %v", h, got[h], k)
+		}
+	}
+	// Line numbers of the offending #include (source starts with a blank line).
+	wantLine := map[string]int{"d/d.h": 4, "c/c_priv.h": 5, "u/u.h": 6}
+	for h, ln := range wantLine {
+		if line[h] != ln {
+			t.Errorf("header %s: got line %d, want %d", h, line[h], ln)
 		}
 	}
 	// The own header, the declared dep's header, and <vector> must NOT be flagged.
@@ -117,6 +126,20 @@ func TestAllowUndeclared(t *testing.T) {
 	opt.AllowUndec = map[string]bool{"vendor/x.h": true}
 	if got := Check([]*graph.Node{libA}, opt); len(got) != 0 {
 		t.Fatalf("allowed header should be exempt, got %v", got)
+	}
+}
+
+func TestFormatGCC(t *testing.T) {
+	i := Issue{
+		Target: "//a:a", TargetPos: "a/BUILD:10:1",
+		Source: "a/a.cc", Line: 4, Col: 1,
+		Header: "d/d.h", Kind: MissingDep, Owners: []string{"//d:d"},
+	}
+	got := i.Format("error")
+	want := "a/a.cc:4:1: error: 'd/d.h' is included here but //d:d is not in the deps of //a:a [hdr-check]\n" +
+		"a/BUILD:10:1: note: add //d:d to deps"
+	if got != want {
+		t.Fatalf("Format:\n got: %q\nwant: %q", got, want)
 	}
 }
 
