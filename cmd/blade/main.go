@@ -52,7 +52,7 @@ func newRootCmd() *cobra.Command {
 		SilenceErrors: false,
 	}
 	root.CompletionOptions.DisableDefaultCmd = true
-	root.AddCommand(newBuildCmd(), newTestCmd(), newRunCmd(), newCleanCmd(), newQueryCmd(), newVersionCmd())
+	root.AddCommand(newBuildCmd(), newTestCmd(), newRunCmd(), newCleanCmd(), newQueryCmd(), newDumpCmd(), newVersionCmd())
 	return root
 }
 
@@ -373,6 +373,48 @@ func newCleanCmd() *cobra.Command {
 	}
 	c.Flags().StringVarP(&profile, "profile", "p", "release", "which profile's outputs to clean: release|debug")
 	c.FParseErrWhitelist.UnknownFlags = true // tolerate Blade's clean flags
+	return c
+}
+
+func newDumpCmd() *cobra.Command {
+	var compdb bool
+	var toFile, profile string
+	c := &cobra.Command{
+		Use:   "dump --compdb [--to-file F] [targets...]",
+		Short: "Dump internal information (currently: --compdb compile_commands.json)",
+		RunE: func(cmd *cobra.Command, targets []string) error {
+			root, err := workspaceRoot()
+			if err != nil {
+				return err
+			}
+			if !compdb {
+				return fmt.Errorf("dump: specify --compdb (other dump modes not implemented yet)")
+			}
+			if profile != "" && profile != "release" && profile != "debug" {
+				return fmt.Errorf("invalid --profile %q (want release or debug)", profile)
+			}
+			if len(targets) == 0 {
+				targets = []string{"//..."}
+			}
+			out, err := build.CompileDB(root, targets, profile)
+			if err != nil {
+				return err
+			}
+			if toFile == "" || toFile == "-" {
+				_, err = os.Stdout.Write(out)
+				return err
+			}
+			if err := os.WriteFile(toFile, out, 0o644); err != nil {
+				return err
+			}
+			fmt.Println("blade: wrote", toFile)
+			return nil
+		},
+	}
+	c.Flags().BoolVar(&compdb, "compdb", false, "dump the compilation database (compile_commands.json)")
+	c.Flags().StringVar(&toFile, "to-file", "", "write to this file (default: stdout)")
+	c.Flags().StringVarP(&profile, "profile", "p", "release", "build profile: release|debug")
+	c.FParseErrWhitelist.UnknownFlags = true
 	return c
 }
 

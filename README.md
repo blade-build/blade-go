@@ -132,6 +132,7 @@ blade run //flare/example/rpc:server -- --port 80   # build + run; args after --
 blade clean //flare/base/...                        # ninja -t clean those targets (keeps vcpkg tree)
 blade query --deps //flare/base:logging             # transitive deps (--dependents for reverse)
 blade build --hdr-check=error //flare/rpc:rpc        # fail on undeclared header deps
+blade dump --compdb --to-file compile_commands.json //...  # compilation database for clangd
 ```
 
 | flag | effect |
