@@ -395,16 +395,17 @@ func Build(root string, targets []string, opt Options) (string, error) {
 // cc_config.hdr_dep_missing_severity (Blade parity), else Warn. Returns the
 // sorted issues and the effective severity so the caller can report and decide
 // whether to fail.
-func CheckHdrs(root string, targets []string, override, profile string) ([]hdrcheck.Issue, hdrcheck.Severity, error) {
+func CheckHdrs(root string, targets []string, override, profile string) ([]hdrcheck.Issue, error) {
 	l, g, expanded, err := loadGraph(root, targets, profile)
 	if err != nil {
-		return nil, hdrcheck.Off, err
+		return nil, err
 	}
+	// Inclusion check severity: --hdr-check override, else cc_config, else warn.
 	sev := hdrcheck.Warn
 	if override != "" {
 		s, ok := hdrcheck.ParseSeverity(override)
 		if !ok {
-			return nil, hdrcheck.Off, fmt.Errorf("invalid --hdr-check value %q (want off|warn|error)", override)
+			return nil, fmt.Errorf("invalid --hdr-check value %q (want off|warn|error)", override)
 		}
 		sev = s
 	} else if v, ok := l.Config.GetItem("cc_config", "hdr_dep_missing_severity"); ok {
@@ -412,22 +413,43 @@ func CheckHdrs(root string, targets []string, override, profile string) ([]hdrch
 			sev = hdrcheck.SeverityFromBlade(s)
 		}
 	}
-	if sev == hdrcheck.Off {
-		return nil, hdrcheck.Off, nil
+	// Unused-deps severity: cc_config only (Blade default 'debug' == Off). An
+	// explicit --hdr-check=off disables both checks.
+	unusedSev := hdrcheck.Off
+	if override != "off" {
+		if v, ok := l.Config.GetItem("cc_config", "unused_deps_severity"); ok {
+			if s, ok := v.(string); ok {
+				unusedSev = hdrcheck.SeverityFromBlade(s)
+			}
+		}
+	}
+	if sev == hdrcheck.Off && unusedSev == hdrcheck.Off {
+		return nil, nil
 	}
 	only := make(map[string]bool, len(expanded))
 	for _, lbl := range expanded {
 		only[lbl] = true
 	}
+	// Extra -I roots (cc_config.extra_incs) + their build-dir mirror, so a header
+	// included via one of them (flare's `#include "blake3/blake3.h"` under
+	// `-Ithirdparty`) resolves to its owning target's full workspace-relative hdr.
+	bd := buildDirFor(profile)
+	var incDirs []string
+	blade := bladectx.BuildModule("", bd, l.Config)
+	for _, d := range evalConfigList(l.Config, "cc_config", "extra_incs", blade) {
+		incDirs = append(incDirs, d, bd+"/"+d)
+	}
 	tc := toolchain.Detect()
 	issues := hdrcheck.Check(g.All(), hdrcheck.Options{
-		Root:      root,
-		BuildDir:  buildDirFor(profile),
-		ObjSuffix: tc.ObjSuffix(),
-		Severity:  sev,
-		Only:      only,
+		Root:           root,
+		BuildDir:       bd,
+		ObjSuffix:      tc.ObjSuffix(),
+		Severity:       sev,
+		UnusedSeverity: unusedSev,
+		IncludeDirs:    incDirs,
+		Only:           only,
 	})
-	return issues, sev, nil
+	return issues, nil
 }
 
 // DefaultJobs is the default parallelism for both building and testing when the

@@ -129,6 +129,49 @@ func TestAllowUndeclared(t *testing.T) {
 	}
 }
 
+// Unused-deps: a dep whose public header the target never includes is flagged;
+// a dep whose header IS included is not; a dep with no public headers is exempt
+// (linked for symbols).
+func TestUnusedDeps(t *testing.T) {
+	root := t.TempDir()
+	writeFile(t, filepath.Join(root, "a", "a.cc"), "#include \"b/b.h\"\n")
+
+	libB := ccLib("b", "b", map[string]any{"hdrs": []any{"b.h"}})  // used (included)
+	libC := ccLib("c", "c", map[string]any{"hdrs": []any{"c.h"}})  // unused (not included)
+	libD := ccLib("d", "d", map[string]any{"srcs": []any{"d.cc"}}) // no public hdrs -> exempt
+	libA := ccLib("a", "a", map[string]any{"srcs": []any{"a.cc"}})
+	libA.Deps = []*graph.Node{libB, libC, libD}
+
+	issues := Check([]*graph.Node{libA, libB, libC, libD}, Options{
+		Root: root, BuildDir: "build_release", ObjSuffix: ".o",
+		Severity: Off, UnusedSeverity: Warn, // unused-only run (no closure needed)
+		Only: map[string]bool{"//a:a": true},
+	})
+	if len(issues) != 1 || issues[0].Kind != UnusedDep || issues[0].Owners[0] != "//c:c" {
+		t.Fatalf("want 1 unused-dep on //c:c, got %v", issues)
+	}
+}
+
+// Umbrella exemption: a facade that re-declares a dep's public header in its own
+// hdrs (co-ownership) is republishing that dep's interface -- the dep is not unused.
+func TestUnusedDepsReexportExemption(t *testing.T) {
+	root := t.TempDir()
+	writeFile(t, filepath.Join(root, "p", "shared.h"), "// umbrella re-export\n")
+
+	libX := ccLib("p", "x", map[string]any{"hdrs": []any{"shared.h"}})
+	libUM := ccLib("p", "um", map[string]any{"hdrs": []any{"shared.h"}}) // co-owns p/shared.h
+	libUM.Deps = []*graph.Node{libX}
+
+	issues := Check([]*graph.Node{libX, libUM}, Options{
+		Root: root, BuildDir: "build_release", ObjSuffix: ".o",
+		Severity: Off, UnusedSeverity: Warn,
+		Only: map[string]bool{"//p:um": true},
+	})
+	if len(issues) != 0 {
+		t.Fatalf("umbrella dep should be exempt from unused-deps, got %v", issues)
+	}
+}
+
 func TestFormatGCC(t *testing.T) {
 	i := Issue{
 		Target: "//a:a", TargetPos: "a/BUILD:10:1",

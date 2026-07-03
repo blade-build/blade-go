@@ -176,29 +176,30 @@ func newBuildCmd() *cobra.Command {
 	return c
 }
 
-// runHdrCheck runs the header inclusion-dependency check and reports issues.
-// The severity comes from `override` (a --hdr-check value) or, when empty, the
-// project's cc_config. Returns an error (failing the command) only when the
-// effective severity is "error" and issues were found; "warn" prints and returns
-// nil; "off" is a no-op.
+// runHdrCheck runs the header inclusion-dependency + unused-deps checks and
+// reports issues. Each issue carries its own severity (inclusion vs unused can
+// differ per cc_config). Returns an error (failing the command) only when at
+// least one issue is at "error" severity.
 func runHdrCheck(root string, targets []string, override, profile string) error {
-	issues, sev, err := build.CheckHdrs(root, targets, override, profile)
+	issues, err := build.CheckHdrs(root, targets, override, profile)
 	if err != nil {
 		return err
 	}
-	if len(issues) == 0 || sev == hdrcheck.Off {
+	if len(issues) == 0 {
 		return nil
 	}
-	sevWord := "warning"
-	if sev == hdrcheck.Error {
-		sevWord = "error"
-	}
+	fatal := 0
 	for _, is := range issues {
-		fmt.Fprintln(os.Stderr, is.Format(sevWord))
+		word := "warning"
+		if is.Sev == hdrcheck.Error {
+			word = "error"
+			fatal++
+		}
+		fmt.Fprintln(os.Stderr, is.Format(word))
 	}
 	fmt.Fprintf(os.Stderr, "blade: hdr-check found %d issue(s)\n", len(issues))
-	if sev == hdrcheck.Error {
-		return fmt.Errorf("header check failed: %d issue(s)", len(issues))
+	if fatal > 0 {
+		return fmt.Errorf("header check failed: %d error(s)", fatal)
 	}
 	return nil
 }
