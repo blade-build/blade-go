@@ -87,6 +87,7 @@ type buildFlags struct {
 	hdrCheck  string // header inclusion check: off|warn|error
 	debugInfo string // debug-info level: no|low|mid|high ("" = project default)
 	sanitizer string // --sanitizer set (comma-separated: address,thread,undefined,leak,memory)
+	coverage  bool   // --coverage: instrument for gcov coverage
 }
 
 // register adds the flags to fs and tolerates unknown Blade flags.
@@ -101,13 +102,14 @@ func (bf *buildFlags) register(c *cobra.Command) {
 	f.StringVar(&bf.hdrCheck, "hdr-check", "", "header inclusion-dependency check: off|warn|error (default: project cc_config)")
 	f.StringVar(&bf.debugInfo, "debug-info-level", "", "debug info level: no|low|mid|high (default: project global_config)")
 	f.StringVar(&bf.sanitizer, "sanitizer", "", "build/test under sanitizers: address,thread,undefined,leak,memory (comma-separated)")
+	f.BoolVar(&bf.coverage, "coverage", false, "instrument for gcov coverage; `blade test --coverage` reports via gcovr")
 
 	// Blade's boolean (store_true) flags that blade-go doesn't act on: declare
 	// them (hidden) so they parse as booleans and don't swallow a following
 	// target the way an unknown flag would; value-taking Blade flags are handled
 	// by the UnknownFlags whitelist below (they correctly consume their value).
 	for _, name := range []string{
-		"verbose", "quiet", "coverage", "gcov", "gprof", "fission", "dwp", "force",
+		"verbose", "quiet", "gcov", "gprof", "fission", "dwp", "force",
 		"no-test", "generate-dynamic", "generate-java", "generate-php",
 		"generate-python", "generate-go", "generate-package", "cc-check-undefined",
 		"no-cc-check-undefined", "load-local-config", "no-load-local-config",
@@ -187,7 +189,7 @@ func newBuildCmd() *cobra.Command {
 				return err
 			}
 			run, nargs := bf.ninja()
-			ninjaFile, err := build.Build(root, targets, build.Options{RunNinja: run, NinjaArgs: nargs, Profile: bf.profile, DebugInfo: bf.debugInfo, Sanitizers: sans})
+			ninjaFile, err := build.Build(root, targets, build.Options{RunNinja: run, NinjaArgs: nargs, Profile: bf.profile, DebugInfo: bf.debugInfo, Sanitizers: sans, Coverage: bf.coverage})
 			if err != nil {
 				return err
 			}
@@ -199,7 +201,7 @@ func newBuildCmd() *cobra.Command {
 			// The header check reads the `.d` depfiles a build produces, so run
 			// it only when we actually built (not --no-build / --stop-after).
 			if run {
-				return runHdrCheck(root, targets, bf.hdrCheck, bf.profile, sans)
+				return runHdrCheck(root, targets, bf.hdrCheck, bf.profile, sans, bf.coverage)
 			}
 			return nil
 		},
@@ -212,8 +214,8 @@ func newBuildCmd() *cobra.Command {
 // reports issues. Each issue carries its own severity (inclusion vs unused can
 // differ per cc_config). Returns an error (failing the command) only when at
 // least one issue is at "error" severity.
-func runHdrCheck(root string, targets []string, override, profile string, sanitizers []string) error {
-	issues, err := build.CheckHdrs(root, targets, override, profile, sanitizers)
+func runHdrCheck(root string, targets []string, override, profile string, sanitizers []string, coverage bool) error {
+	issues, err := build.CheckHdrs(root, targets, override, profile, sanitizers, coverage)
 	if err != nil {
 		return err
 	}
@@ -273,7 +275,7 @@ func newTestCmd() *cobra.Command {
 					fmt.Print(r.Output)
 				}
 			}
-			results, err := build.Test(root, targets, build.Options{NinjaArgs: nargs, FullTest: fullTest, TestJobs: testJobs, Profile: bf.profile, DebugInfo: bf.debugInfo, Sanitizers: sans}, print)
+			results, err := build.Test(root, targets, build.Options{NinjaArgs: nargs, FullTest: fullTest, TestJobs: testJobs, Profile: bf.profile, DebugInfo: bf.debugInfo, Sanitizers: sans, Coverage: bf.coverage}, print)
 			if err != nil {
 				return err
 			}
@@ -294,10 +296,14 @@ func newTestCmd() *cobra.Command {
 				note = fmt.Sprintf(" (%d cached)", cached)
 			}
 			fmt.Printf("blade: %d/%d tests passed%s\n", passed, len(results), note)
+			// After a --coverage run the tests have written .gcda; report on them.
+			if bf.coverage {
+				_ = build.CoverageReport(root, bf.profile, sans)
+			}
 			// The header check is part of the build, so `blade test` -- which builds
 			// its targets -- runs it too. A test failure takes precedence in the exit
 			// code, but the check still reports either way.
-			hdrErr := runHdrCheck(root, targets, bf.hdrCheck, bf.profile, sans)
+			hdrErr := runHdrCheck(root, targets, bf.hdrCheck, bf.profile, sans, bf.coverage)
 			if passed != len(results) {
 				return fmt.Errorf("%d test(s) failed", len(results)-passed)
 			}
@@ -335,7 +341,7 @@ func newRunCmd() *cobra.Command {
 				return err
 			}
 			_, nargs := bf.ninja()
-			code, err := build.Run(root, target, progArgs, build.Options{NinjaArgs: nargs, Profile: bf.profile, DebugInfo: bf.debugInfo, Sanitizers: sans})
+			code, err := build.Run(root, target, progArgs, build.Options{NinjaArgs: nargs, Profile: bf.profile, DebugInfo: bf.debugInfo, Sanitizers: sans, Coverage: bf.coverage})
 			if err != nil {
 				return err
 			}
@@ -391,6 +397,7 @@ func newQueryCmd() *cobra.Command {
 
 func newCleanCmd() *cobra.Command {
 	var profile, san string
+	var cov bool
 	c := &cobra.Command{
 		Use:   "clean [targets...]",
 		Short: "Remove build outputs (ninja -t clean); keeps the vcpkg tree",
@@ -409,7 +416,7 @@ func newCleanCmd() *cobra.Command {
 			if len(targets) == 0 {
 				targets = []string{"//..."} // clean everything by default
 			}
-			if err := build.Clean(root, targets, profile, sans); err != nil {
+			if err := build.Clean(root, targets, profile, sans, cov); err != nil {
 				return err
 			}
 			fmt.Println("blade: cleaned")
@@ -418,12 +425,13 @@ func newCleanCmd() *cobra.Command {
 	}
 	c.Flags().StringVarP(&profile, "profile", "p", "release", "which profile's outputs to clean: release|debug")
 	c.Flags().StringVar(&san, "sanitizer", "", "which sanitizer variant's outputs to clean")
+	c.Flags().BoolVar(&cov, "coverage", false, "clean the coverage variant's outputs")
 	c.FParseErrWhitelist.UnknownFlags = true // tolerate Blade's clean flags
 	return c
 }
 
 func newDumpCmd() *cobra.Command {
-	var compdb bool
+	var compdb, cov bool
 	var toFile, profile, san string
 	c := &cobra.Command{
 		Use:   "dump --compdb [--to-file F] [targets...]",
@@ -446,7 +454,7 @@ func newDumpCmd() *cobra.Command {
 			if len(targets) == 0 {
 				targets = []string{"//..."}
 			}
-			out, err := build.CompileDB(root, targets, profile, sans)
+			out, err := build.CompileDB(root, targets, profile, sans, cov)
 			if err != nil {
 				return err
 			}
@@ -465,6 +473,7 @@ func newDumpCmd() *cobra.Command {
 	c.Flags().StringVar(&toFile, "to-file", "", "write to this file (default: stdout)")
 	c.Flags().StringVarP(&profile, "profile", "p", "release", "build profile: release|debug")
 	c.Flags().StringVar(&san, "sanitizer", "", "sanitizer variant's compile commands")
+	c.Flags().BoolVar(&cov, "coverage", false, "coverage variant's compile commands")
 	c.FParseErrWhitelist.UnknownFlags = true
 	return c
 }

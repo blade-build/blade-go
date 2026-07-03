@@ -37,6 +37,7 @@ type Generator struct {
 	Optimize         []string         // cc_config optimize flags (override the release default)
 	SanitizeCompile  []string         // --sanitizer compile flags (all compiles, incl. generated)
 	SanitizeLink     []string         // --sanitizer link flags
+	CoverageFlags    []string         // --coverage flags (both compile and link: gcc/clang --coverage)
 	TestVcpkgs       []label.VcpkgDep // cc_test_config gtest libs that resolve to vcpkg
 	TestSyslibs      []string         // cc_test_config gtest libs that are #-syslibs
 	BenchmarkVcpkgs  []label.VcpkgDep // cc_config benchmark libs that resolve to vcpkg
@@ -125,9 +126,10 @@ func (gen *Generator) Generate(g *graph.Graph) (*ninja.File, error) {
 	// protector. Debug info (-gdwarf-2) comes from the project's cc_config in both.
 	cpp := append(append([]string{}, gen.Cppflags...), gen.profileFlags()...)
 	cpp = append(cpp, gen.debugInfoFlags()...)
-	// Sanitizer flags go on *every* compile (generated code too): a sanitized
-	// binary needs all its translation units instrumented consistently.
+	// Sanitizer + coverage flags go on *every* compile (generated code too): a
+	// sanitized/instrumented binary needs all its translation units consistent.
 	cpp = append(cpp, gen.SanitizeCompile...)
+	cpp = append(cpp, gen.CoverageFlags...)
 	f.SetVar("cppflags", strings.Join(cpp, " "))
 	f.SetVar("cxxflags", strings.Join(gen.Cxxflags, " "))
 	f.SetVar("cflags", strings.Join(gen.Cflags, " "))
@@ -137,7 +139,9 @@ func (gen *Generator) Generate(g *graph.Graph) (*ninja.File, error) {
 	// plus the sanitizer runtime link flags.
 	f.SetVar("c_warnings", strings.Join(gen.CWarnings, " "))
 	f.SetVar("cxx_warnings", strings.Join(gen.CxxWarnings, " "))
-	f.SetVar("ldflags", strings.Join(append(append([]string{}, gen.Linkflags...), gen.SanitizeLink...), " "))
+	ld := append(append([]string{}, gen.Linkflags...), gen.SanitizeLink...)
+	ld = append(ld, gen.CoverageFlags...)
+	f.SetVar("ldflags", strings.Join(ld, " "))
 	gen.emitRules(f)
 
 	libOf := map[*graph.Node]string{}

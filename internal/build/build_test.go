@@ -633,7 +633,7 @@ func TestClean(t *testing.T) {
 	// The actual `ninja -t clean` path needs a real build + ninja and is
 	// integration-verified on flare rather than here.
 	root := t.TempDir()
-	if err := Clean(root, []string{"//..."}, "release", nil); err != nil {
+	if err := Clean(root, []string{"//..."}, "release", nil, false); err != nil {
 		t.Fatalf("clean with no build dir should be a no-op, got %v", err)
 	}
 }
@@ -760,5 +760,36 @@ func TestHeaderCompilesWithXCpp(t *testing.T) {
 	}
 	if !strings.Contains(out, "h.h.o: cxx_header ") {
 		t.Errorf("header not compiled via cxx_header:\n%s", out)
+	}
+}
+
+func TestBuildDirVariants(t *testing.T) {
+	cases := []struct {
+		profile    string
+		sanitizers []string
+		coverage   bool
+		want       string
+	}{
+		{"release", nil, false, "build_release"},
+		{"debug", nil, false, "build_debug"},
+		{"release", []string{"address"}, false, "build_release_asan"},
+		{"release", nil, true, "build_release_coverage"},
+		{"release", []string{"address", "undefined"}, true, "build_release_coverage_asan+ubsan"},
+	}
+	for _, c := range cases {
+		if got := buildDirFor(c.profile, c.sanitizers, c.coverage); got != c.want {
+			t.Errorf("buildDirFor(%q,%v,%v)=%q, want %q", c.profile, c.sanitizers, c.coverage, got, c.want)
+		}
+	}
+}
+
+func TestGlobToRegex(t *testing.T) {
+	for glob, want := range map[string]string{
+		"thirdparty/**": `thirdparty/.*`,
+		"*.pb.cc":       `[^/]*\.pb\.cc`,
+	} {
+		if got := globToRegex(glob); got != want {
+			t.Errorf("globToRegex(%q)=%q, want %q", glob, got, want)
+		}
 	}
 }
