@@ -16,6 +16,7 @@ import (
 	"github.com/spf13/cobra"
 
 	"github.com/blade-build/blade-go/internal/build"
+	"github.com/blade-build/blade-go/internal/hdrcheck"
 	"github.com/blade-build/blade-go/internal/resource"
 	"github.com/blade-build/blade-go/internal/version"
 )
@@ -64,6 +65,7 @@ type buildFlags struct {
 	noBuild   bool
 	stopAfter string
 	profile   string
+	hdrCheck  string // header inclusion check: off|warn|error
 }
 
 // register adds the flags to fs and tolerates unknown Blade flags.
@@ -75,6 +77,7 @@ func (bf *buildFlags) register(c *cobra.Command) {
 	f.BoolVar(&bf.noBuild, "no-build", false, "generate build.ninja but don't run ninja")
 	f.StringVar(&bf.stopAfter, "stop-after", "", "stop after a phase: load|analyze|generate|build")
 	f.StringVarP(&bf.profile, "profile", "p", "release", "build profile: release|debug")
+	f.StringVar(&bf.hdrCheck, "hdr-check", "", "header inclusion-dependency check: off|warn|error (default: project cc_config)")
 
 	// Blade's boolean (store_true) flags that blade-go doesn't act on: declare
 	// them (hidden) so they parse as booleans and don't swallow a following
@@ -142,11 +145,43 @@ func newBuildCmd() *cobra.Command {
 				verb = "generated"
 			}
 			fmt.Println("blade:", verb, targets, "->", ninjaFile)
+			// The header check reads the `.d` depfiles a build produces, so run
+			// it only when we actually built (not --no-build / --stop-after).
+			if run {
+				return runHdrCheck(root, targets, bf.hdrCheck)
+			}
 			return nil
 		},
 	}
 	bf.register(c)
 	return c
+}
+
+// runHdrCheck runs the header inclusion-dependency check and reports issues.
+// The severity comes from `override` (a --hdr-check value) or, when empty, the
+// project's cc_config. Returns an error (failing the command) only when the
+// effective severity is "error" and issues were found; "warn" prints and returns
+// nil; "off" is a no-op.
+func runHdrCheck(root string, targets []string, override string) error {
+	issues, sev, err := build.CheckHdrs(root, targets, override)
+	if err != nil {
+		return err
+	}
+	if len(issues) == 0 || sev == hdrcheck.Off {
+		return nil
+	}
+	label := "warning"
+	if sev == hdrcheck.Error {
+		label = "error"
+	}
+	for _, is := range issues {
+		fmt.Fprintf(os.Stderr, "blade: hdr-check %s: %s\n", label, is.Format())
+	}
+	fmt.Fprintf(os.Stderr, "blade: hdr-check found %d issue(s)\n", len(issues))
+	if sev == hdrcheck.Error {
+		return fmt.Errorf("header check failed: %d issue(s)", len(issues))
+	}
+	return nil
 }
 
 func newTestCmd() *cobra.Command {
