@@ -693,3 +693,34 @@ func TestStageTestdata(t *testing.T) {
 		t.Errorf("conf/x.yaml not staged: data=%q err=%v", got, err)
 	}
 }
+
+func TestTestFingerprintAndHistory(t *testing.T) {
+	root := t.TempDir()
+	bin := filepath.Join(root, "build64_release/p/t")
+	if err := os.MkdirAll(filepath.Dir(bin), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	os.WriteFile(bin, []byte("v1"), 0o755)
+	n := &graph.Node{Target: &target.Target{Type: "cc_test", Name: "t", Package: "p"}}
+
+	fp1 := testFingerprint(root, "build64_release/p/t", n)
+	if fp1 == "" {
+		t.Fatal("empty fingerprint")
+	}
+	if fp1 != testFingerprint(root, "build64_release/p/t", n) {
+		t.Error("fingerprint not stable for unchanged inputs")
+	}
+	// Changing the binary (size/mtime) changes the fingerprint.
+	os.WriteFile(bin, []byte("v2-bigger"), 0o755)
+	if testFingerprint(root, "build64_release/p/t", n) == fp1 {
+		t.Error("fingerprint should change when the binary changes")
+	}
+
+	// History round-trips.
+	h := testHistory{"//p:t": {Passed: true, Fingerprint: fp1}}
+	saveTestHistory(root, h)
+	got := loadTestHistory(root)
+	if got["//p:t"].Fingerprint != fp1 || !got["//p:t"].Passed {
+		t.Errorf("history round-trip lost data: %+v", got)
+	}
+}

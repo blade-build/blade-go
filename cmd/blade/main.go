@@ -82,7 +82,7 @@ func (bf *buildFlags) register(c *cobra.Command) {
 	// by the UnknownFlags whitelist below (they correctly consume their value).
 	for _, name := range []string{
 		"verbose", "quiet", "coverage", "gcov", "gprof", "fission", "dwp", "force",
-		"full-test", "no-test", "generate-dynamic", "generate-java", "generate-php",
+		"no-test", "generate-dynamic", "generate-java", "generate-php",
 		"generate-python", "generate-go", "generate-package", "cc-check-undefined",
 		"no-cc-check-undefined", "load-local-config", "no-load-local-config",
 		"profiling", "autofdo-generate", "run-unrepaired-tests", "show-details",
@@ -151,6 +151,7 @@ func newBuildCmd() *cobra.Command {
 
 func newTestCmd() *cobra.Command {
 	var bf buildFlags
+	var fullTest bool
 	c := &cobra.Command{
 		Use:   "test [flags] <target>...",
 		Short: "Build and run the cc_test targets in the given patterns",
@@ -168,12 +169,16 @@ func newTestCmd() *cobra.Command {
 				if r.Passed {
 					status = "PASS"
 				}
-				fmt.Printf("%s %s\n", status, r.Label)
+				suffix := ""
+				if r.Cached {
+					suffix = " (cached)" // passed last time, inputs unchanged
+				}
+				fmt.Printf("%s %s%s\n", status, r.Label, suffix)
 				if !r.Passed {
 					fmt.Print(r.Output)
 				}
 			}
-			results, err := build.Test(root, targets, build.Options{NinjaArgs: nargs}, print)
+			results, err := build.Test(root, targets, build.Options{NinjaArgs: nargs, FullTest: fullTest}, print)
 			if err != nil {
 				return err
 			}
@@ -183,7 +188,17 @@ func newTestCmd() *cobra.Command {
 					passed++
 				}
 			}
-			fmt.Printf("blade: %d/%d tests passed\n", passed, len(results))
+			cached := 0
+			for _, r := range results {
+				if r.Cached {
+					cached++
+				}
+			}
+			note := ""
+			if cached > 0 {
+				note = fmt.Sprintf(" (%d cached)", cached)
+			}
+			fmt.Printf("blade: %d/%d tests passed%s\n", passed, len(results), note)
 			if passed != len(results) {
 				return fmt.Errorf("%d test(s) failed", len(results)-passed)
 			}
@@ -191,6 +206,7 @@ func newTestCmd() *cobra.Command {
 		},
 	}
 	bf.register(c)
+	c.Flags().BoolVar(&fullTest, "full-test", false, "re-run every test, ignoring the incremental cache")
 	return c
 }
 
