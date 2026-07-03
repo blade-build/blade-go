@@ -150,9 +150,10 @@ existing Blade invocation still runs.
 
 ### Header inclusion check
 
-After a build, blade-go verifies that every project header a source *directly*
-`#include`s belongs to a cc target the including target declares in `deps` (or to
-itself) — Blade's inclusion-dependency check. It reports **missing dependency**
+As part of a build — `blade build` and `blade test` (which builds its targets) —
+blade-go verifies that every project header a source *directly* `#include`s
+belongs to a cc target the including target declares in `deps` (or to itself) —
+Blade's inclusion-dependency check. It reports **missing dependency**
 (header owned by a non-dependency), **private header** (another target's `srcs`
 header), and **undeclared** (owned by no cc target). Severity defaults to the
 project's `cc_config.hdr_dep_missing_severity`; `--hdr-check {off,warn,error}`
