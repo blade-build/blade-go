@@ -654,7 +654,22 @@ func CheckUndefined(root string, targets []string, override, profile string, san
 	}
 
 	tc := toolchain.Detect()
-	system := ccundef.SystemSymbols(tc.CC, tc.OS, "nm")
+	// Symbol extraction is toolchain-specific: nm on gcc/clang, dumpbin on MSVC
+	// (run with the captured dev env so it finds its DLLs; resolved next to cl).
+	var system map[string]bool
+	extract := func(file string) (undef, defined map[string]bool) {
+		return ccundef.NmExternals("nm", file)
+	}
+	if tc.IsMSVC() {
+		dumpbin := filepath.Join(filepath.Dir(tc.CC), "dumpbin.exe")
+		env := tc.Env
+		system = ccundef.SystemSymbolsMSVC(dumpbin, env)
+		extract = func(file string) (map[string]bool, map[string]bool) {
+			return ccundef.DumpbinExternals(dumpbin, env, file)
+		}
+	} else {
+		system = ccundef.SystemSymbols(tc.CC, tc.OS, "nm")
+	}
 	blade := bladectx.BuildModule("", gen.BuildDir, l.Config)
 	allowGlobal := evalConfigList(l.Config, "cc_library_config", "allow_undefined", blade)
 
@@ -673,7 +688,7 @@ func CheckUndefined(root string, targets []string, override, profile string, san
 		if d, ok := definedCache[archive]; ok {
 			return d
 		}
-		_, d := ccundef.NmExternals("nm", abs(archive))
+		_, d := extract(abs(archive))
 		definedCache[archive] = d
 		return d
 	}
@@ -693,7 +708,7 @@ func CheckUndefined(root string, targets []string, override, profile string, san
 		if own == "" {
 			continue // header-only / no archive
 		}
-		undef, ownDef := ccundef.NmExternals("nm", abs(own))
+		undef, ownDef := extract(abs(own))
 		depDefined := map[string]bool{}
 		for _, d := range deps {
 			for s := range getDefined(d) {
