@@ -71,6 +71,14 @@ var residualBaseline = compileAll(
 	// dynamic loader provides at runtime (it shows as U in libc.so.6 and the
 	// non-shared helper alike), so no scannable library defines it.
 	`_?__stack_chk_\w+`,
+	// MSVC linker-/compiler-injected names not defined by any scannable lib:
+	// __ImageBase (linker), _fltused (FP marker), Control-Flow-Guard and
+	// CastGuard tables, and the security cookie.
+	`__ImageBase`,
+	`_fltused`,
+	`__guard_\w+`,
+	`__castguard_\w+`,
+	`__security_cookie`,
 )
 
 func compileAll(pats ...string) []*regexp.Regexp {
@@ -218,6 +226,99 @@ func itoa(n int) string {
 		n /= 10
 	}
 	return string(b)
+}
+
+// DumpbinExternals extracts external symbols from a COFF object/archive via
+// MSVC's `dumpbin /SYMBOLS`, the Windows analog of NmExternals. A COFF symbol
+// line is "IDX ADDR SECT TYPE VIS External|Static | Name"; an External whose
+// section is UNDEF is undefined, any other External (SECTn/ABS) is defined.
+// dumpbin is a VS tool, so it runs with env (the captured MSVC dev environment)
+// to find its DLLs. Failure -> empty sets. Symbols are unversioned on COFF, and
+// on x64/ARM64 carry no leading underscore, so no name munging is needed.
+func DumpbinExternals(dumpbin string, env []string, file string) (undef, defined map[string]bool) {
+	undef, defined = map[string]bool{}, map[string]bool{}
+	if dumpbin == "" {
+		return undef, defined
+	}
+	cmd := exec.Command(dumpbin, "/NOLOGO", "/SYMBOLS", file)
+	if len(env) > 0 {
+		cmd.Env = append(os.Environ(), env...)
+	}
+	out, err := cmd.Output()
+	if err != nil {
+		return undef, defined
+	}
+	return parseDumpbinSymbols(out)
+}
+
+// parseDumpbinSymbols parses `dumpbin /SYMBOLS` output. Each symbol line is
+// "IDX ADDR SECT TYPE VIS External|Static | Name"; only Externals count -- one
+// whose section (left of "External") is UNDEF is undefined, any other is defined.
+func parseDumpbinSymbols(out []byte) (undef, defined map[string]bool) {
+	undef, defined = map[string]bool{}, map[string]bool{}
+	for _, raw := range strings.Split(string(out), "\n") {
+		ext := strings.Index(raw, " External ")
+		if ext < 0 {
+			continue
+		}
+		bar := strings.LastIndexByte(raw, '|')
+		if bar < 0 || bar < ext {
+			continue
+		}
+		name := strings.TrimSpace(raw[bar+1:])
+		if name == "" {
+			continue
+		}
+		if strings.Contains(raw[:ext], "UNDEF") {
+			undef[name] = true
+		} else {
+			defined[name] = true
+		}
+	}
+	return undef, defined
+}
+
+// msvcSystemLibs are the libraries a default MSVC link pulls in: the dynamic-CRT
+// trio (/MD, blade-go's default), the static-CRT trio (for /MT projects), and the
+// core Windows import libs. Whichever are present on the LIB path are scanned; an
+// absent one is simply skipped (over-broad only reduces findings).
+var msvcSystemLibs = []string{
+	"msvcrt.lib", "vcruntime.lib", "ucrt.lib", "msvcprt.lib", // dynamic CRT + C++ STL (/MD)
+	"libcmt.lib", "libvcruntime.lib", "libucrt.lib", "libcpmt.lib", // static CRT + C++ STL (/MT)
+	"kernel32.lib", "user32.lib", "oldnames.lib", // core Win32 import libs
+}
+
+// SystemSymbolsMSVC unions the defined symbols of the default MSVC system
+// libraries found on the LIB path (from the dev env), so a target referencing the
+// CRT / Win32 API doesn't flag. dumpbin is resolved next to cl (dir/dumpbin.exe).
+func SystemSymbolsMSVC(dumpbin string, env []string) map[string]bool {
+	syms := map[string]bool{}
+	libDirs := filepath.SplitList(envVal(env, "LIB"))
+	for _, name := range msvcSystemLibs {
+		for _, dir := range libDirs {
+			p := filepath.Join(dir, name)
+			if _, err := os.Stat(p); err != nil {
+				continue
+			}
+			_, def := DumpbinExternals(dumpbin, env, p)
+			for s := range def {
+				syms[s] = true
+			}
+			break
+		}
+	}
+	return syms
+}
+
+// envVal returns the value of key in a KEY=VALUE env slice (case-insensitive).
+func envVal(env []string, key string) string {
+	pre := strings.ToUpper(key) + "="
+	for _, e := range env {
+		if len(e) > len(key) && strings.EqualFold(e[:len(key)+1], pre) {
+			return e[len(key)+1:]
+		}
+	}
+	return ""
 }
 
 // SystemSymbols returns the union of defined symbols from the system libraries a

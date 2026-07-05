@@ -52,3 +52,31 @@ func TestStackProtectorBaseline(t *testing.T) {
 		t.Fatalf("stack-protector baseline: got %v, want [realmissing]", got)
 	}
 }
+
+func TestParseDumpbinSymbols(t *testing.T) {
+	// Sample `dumpbin /SYMBOLS` lines (x64/ARM64 COFF): UNDEF External = undefined,
+	// SECTn External = defined; Static and section headers are ignored.
+	out := `
+COFF SYMBOL TABLE
+000 00000000 SECT1  notype       Static       | .text
+008 00000000 UNDEF  notype ()    External     | ?missing_fn@@YAHH@Z (int __cdecl missing_fn(int))
+009 00000000 SECT3  notype ()    External     | ?use_it@@YAHXZ (int __cdecl use_it(void))
+00A 00000000 UNDEF  notype ()    External     | memcpy
+00B 00000000 SECT2  notype       Static       | localthing
+`
+	undef, defined := parseDumpbinSymbols([]byte(out))
+	for _, s := range []string{"?missing_fn@@YAHH@Z (int __cdecl missing_fn(int))", "memcpy"} {
+		if !undef[s] {
+			t.Errorf("expected undef %q", s)
+		}
+	}
+	if !defined["?use_it@@YAHXZ (int __cdecl use_it(void))"] {
+		t.Error("expected use_it defined")
+	}
+	if undef["localthing"] || defined["localthing"] {
+		t.Error("Static symbol must be ignored")
+	}
+	if len(undef) != 2 || len(defined) != 1 {
+		t.Errorf("counts: undef=%d defined=%d", len(undef), len(defined))
+	}
+}
