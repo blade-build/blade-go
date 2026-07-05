@@ -578,3 +578,37 @@ func TestPickForeignArchive(t *testing.T) {
 		t.Errorf("ambiguous no-match should be empty, got %q", got)
 	}
 }
+
+func TestGenerateMSVCRules(t *testing.T) {
+	// Drive the MSVC codepath on any host by constructing an MSVC toolchain
+	// explicitly (IsMSVC keys on OS=="windows").
+	g, _ := buildGraph(t, map[string]string{
+		"base/BUILD": `cc_library(name = 'base', srcs = ['base.cc'], visibility = ['PUBLIC'])`,
+		"app/BUILD":  `cc_binary(name = 'app', srcs = ['main.cc'], defs = ['FOO=1'], deps = ['//base:base'])`,
+	}, "//app:app")
+	tc := &toolchain.Toolchain{OS: "windows", CC: "cl.exe", CXX: "cl.exe", AR: "lib.exe", Link: "link.exe"}
+	f, err := New(tc).Generate(g)
+	if err != nil {
+		t.Fatal(err)
+	}
+	out := f.String()
+	wants := []string{
+		"/nologo /c /showIncludes",                             // cl compile
+		"deps = msvc",                                          // ninja MSVC dep parsing
+		"msvc_deps_prefix = Note: including file:",             // /showIncludes prefix
+		"/Fo${out} /Tp${in}",                                   // C++ object output + language
+		"${ar} /nologo /OUT:${out} ${in}",                      // lib.exe archive
+		"${link} /nologo ${in} ${libs} ${ldflags} /OUT:${out}", // link.exe
+		"link = link.exe",                                      // linker var
+		"build build_release/base/base.lib: ar",                // MSVC static-lib name
+		"build build_release/app/app.exe: link",                // MSVC exe name
+		"/DFOO=1",                                              // MSVC define flag
+		`/I"."`,                                                // MSVC include flag (quoted for spaces)
+		"/O2 /DNDEBUG",                                         // MSVC release optimize
+	}
+	for _, w := range wants {
+		if !strings.Contains(out, w) {
+			t.Errorf("MSVC ninja missing %q\n---\n%s", w, out)
+		}
+	}
+}

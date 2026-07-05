@@ -67,6 +67,16 @@ func New(tc *toolchain.Toolchain) *Generator {
 // Python Blade: release optimizes (-O2) and defines NDEBUG; debug leaves asserts
 // live and unoptimized (-O0) and adds the stack protector.
 func (gen *Generator) profileFlags() []string {
+	if gen.Tc.IsMSVC() {
+		if gen.Profile == "debug" {
+			return []string{"/Od"}
+		}
+		opt := gen.Optimize
+		if len(opt) == 0 {
+			opt = []string{"/O2"}
+		}
+		return append(append([]string{}, opt...), "/DNDEBUG")
+	}
 	if gen.Profile == "debug" {
 		return []string{"-O0", "-fstack-protector"}
 	}
@@ -83,6 +93,15 @@ func (gen *Generator) profileFlags() []string {
 // Empty (unset) adds nothing -- debug info stays whatever the project's cc_config
 // specifies (flare uses -gdwarf-2).
 func (gen *Generator) debugInfoFlags() []string {
+	if gen.Tc.IsMSVC() {
+		// /Z7 embeds CodeView in each .obj (parallel-safe under ninja, unlike the
+		// PDB-server /Zi). 'no'/unset -> none.
+		switch gen.DebugInfo {
+		case "low", "mid", "high":
+			return []string{"/Z7"}
+		}
+		return nil
+	}
 	switch gen.DebugInfo {
 	case "no":
 		return []string{"-g0"}
@@ -115,6 +134,9 @@ func (gen *Generator) Generate(g *graph.Graph) (*ninja.File, error) {
 	f.SetVar("cc", gen.Tc.CC)
 	f.SetVar("cxx", gen.Tc.CXX)
 	f.SetVar("ar", gen.Tc.AR)
+	if gen.Tc.Link != "" {
+		f.SetVar("link", gen.Tc.Link) // MSVC link.exe; gcc/clang link via ${cxx}
+	}
 	f.SetVar("protoc", gen.Protoc)
 	self := gen.Self
 	if self == "" {
@@ -275,6 +297,31 @@ func (gen *Generator) LinkArchives(n *graph.Node) (own string, deps []string) {
 }
 
 func (gen *Generator) emitRules(f *ninja.File) {
+	if gen.Tc.IsMSVC() {
+		gen.emitMSVCRules(f)
+	} else {
+		gen.emitGNURules(f)
+	}
+	f.AddRule(ninja.Rule{
+		Name: "protoc", Description: "PROTOC ${in}",
+		Command: "${protoc} --proto_path=. --cpp_out=${builddir} ${in}",
+	})
+	f.AddRule(ninja.Rule{
+		Name: "gen", Description: "GEN ${out}",
+		Command: "${cmd}",
+	})
+	f.AddRule(ninja.Rule{
+		Name: "resource_index", Description: "RESOURCE INDEX ${out}",
+		Command: "${self} __gen-resource-index ${name} ${path} ${out} ${in}",
+	})
+	f.AddRule(ninja.Rule{
+		Name: "resource", Description: "RESOURCE ${in}",
+		Command: "${self} __gen-resource ${out} ${in}",
+	})
+}
+
+// emitGNURules emits the gcc/clang compile/archive/link rules (depfile deps).
+func (gen *Generator) emitGNURules(f *ninja.File) {
 	f.AddRule(ninja.Rule{
 		Name: "cc", Description: "CC ${out}", Depfile: "${out}.d", Deps: "gcc",
 		Command: "${cc} -MMD -MF ${out}.d ${cppflags} ${cflags} ${c_warnings} ${defs} ${extra_compile_flags} ${includes} -c ${in} -o ${out}",
@@ -298,21 +345,33 @@ func (gen *Generator) emitRules(f *ninja.File) {
 		Name: "link", Description: "LINK ${out}",
 		Command: "${cxx} ${in} ${libs} ${ldflags} -o ${out}",
 	})
+}
+
+// emitMSVCRules emits the MSVC compile/archive/link rules. cl's /showIncludes is
+// parsed natively by ninja (deps=msvc + msvc_deps_prefix), so no depfile. /Tc and
+// /Tp force the C / C++ language (so a .h self-sufficiency check compiles as C++).
+// /external:W0 keeps warnings out of /external:I (vcpkg/system) headers.
+func (gen *Generator) emitMSVCRules(f *ninja.File) {
+	const inc = "Note: including file:"
 	f.AddRule(ninja.Rule{
-		Name: "protoc", Description: "PROTOC ${in}",
-		Command: "${protoc} --proto_path=. --cpp_out=${builddir} ${in}",
+		Name: "cc", Description: "CC ${out}", Deps: "msvc", MsvcDepsPrefix: inc,
+		Command: "${cc} /nologo /c /showIncludes ${cppflags} ${cflags} ${c_warnings} /external:W0 ${defs} ${extra_compile_flags} ${includes} /Fo${out} /Tc${in}",
 	})
 	f.AddRule(ninja.Rule{
-		Name: "gen", Description: "GEN ${out}",
-		Command: "${cmd}",
+		Name: "cxx", Description: "CXX ${out}", Deps: "msvc", MsvcDepsPrefix: inc,
+		Command: "${cxx} /nologo /c /showIncludes /EHsc ${cppflags} ${cxxflags} ${cxx_warnings} /external:W0 ${defs} ${extra_compile_flags} ${includes} /Fo${out} /Tp${in}",
 	})
 	f.AddRule(ninja.Rule{
-		Name: "resource_index", Description: "RESOURCE INDEX ${out}",
-		Command: "${self} __gen-resource-index ${name} ${path} ${out} ${in}",
+		Name: "cxx_header", Description: "CXX ${out}", Deps: "msvc", MsvcDepsPrefix: inc,
+		Command: "${cxx} /nologo /c /showIncludes /EHsc ${cppflags} ${cxxflags} ${cxx_warnings} /external:W0 ${defs} ${extra_compile_flags} ${includes} /Fo${out} /Tp${in}",
 	})
 	f.AddRule(ninja.Rule{
-		Name: "resource", Description: "RESOURCE ${in}",
-		Command: "${self} __gen-resource ${out} ${in}",
+		Name: "ar", Description: "LIB ${out}",
+		Command: "${ar} /nologo /OUT:${out} ${in}",
+	})
+	f.AddRule(ninja.Rule{
+		Name: "link", Description: "LINK ${out}",
+		Command: "${link} /nologo ${in} ${libs} ${ldflags} /OUT:${out}",
 	})
 }
 
@@ -577,7 +636,7 @@ func pickForeignArchive(want string, files map[string]string) string {
 // compilation; a src naming a generated file compiles from its build-dir path.
 func (gen *Generator) emitCompiles(f *ninja.File, n *graph.Node, implicitHdrs []string, genFiles map[string]string) (objs, checkObjs []string) {
 	inc := gen.includes(n)
-	defs := defineFlags(n) // per-target preprocessor defines (cc_test variants)
+	defs := gen.defineFlags(n) // per-target preprocessor defines (cc_test variants)
 	// A target with `warning = 'no'` (flare's thirdparty source builds like blake3)
 	// opts out of the project's cc_config warnings -- override the vars to empty.
 	noWarn := n.Target.AttrString("warning") == "no"
@@ -730,20 +789,32 @@ func (gen *Generator) includes(n *graph.Node) string {
 			sysDirs = append(sysDirs, gen.Vcpkg.PrefixRoot)
 		}
 	}
+	// MSVC: -I -> /I, -isystem -> /external:I (silenced via the rule's
+	// /external:W0). Quote so dirs with spaces (vcpkg trees) survive.
+	reg, sys := "-I", "-isystem "
+	quote := false
+	if gen.Tc.IsMSVC() {
+		reg, sys, quote = "/I", "/external:I ", true
+	}
 	var b strings.Builder
-	for _, d := range dirs {
+	emit := func(flag, d string) {
 		if b.Len() > 0 {
 			b.WriteByte(' ')
 		}
-		b.WriteString("-I")
-		b.WriteString(d)
+		b.WriteString(flag)
+		if quote {
+			b.WriteByte('"')
+			b.WriteString(d)
+			b.WriteByte('"')
+		} else {
+			b.WriteString(d)
+		}
+	}
+	for _, d := range dirs {
+		emit(reg, d)
 	}
 	for _, d := range sysDirs {
-		if b.Len() > 0 {
-			b.WriteByte(' ')
-		}
-		b.WriteString("-isystem ")
-		b.WriteString(d)
+		emit(sys, d)
 	}
 	return b.String()
 }
@@ -858,6 +929,21 @@ func (gen *Generator) transitiveSyslibs(n *graph.Node) []string {
 // the vcpkg args, which may include macOS-only `-framework` flags).
 func (gen *Generator) linkArgs(libs, syslibs, extra []string) string {
 	var parts []string
+	if gen.Tc.IsMSVC() {
+		// MSVC link.exe resolves symbols across all inputs in one pass, so no
+		// grouping/order dance. A `#name` syslib becomes `name.lib` (unless it
+		// already carries an extension); .lib archives are positional inputs.
+		parts = append(parts, libs...)
+		parts = append(parts, extra...)
+		for _, s := range syslibs {
+			if strings.Contains(s, ".") {
+				parts = append(parts, s)
+			} else {
+				parts = append(parts, s+".lib")
+			}
+		}
+		return strings.Join(parts, " ")
+	}
 	if gen.Tc.GroupsLibraries() {
 		grouped := append(append([]string{}, libs...), extra...)
 		if len(grouped) > 0 {
@@ -947,15 +1033,19 @@ func isAsmSource(src string) bool {
 	return false
 }
 
-// defineFlags returns a target's `defs` as -D flags (flare's cc_test size
+// defineFlags returns a target's `defs` as -D/`/D` flags (flare's cc_test size
 // variants pass e.g. defs = ['BUFFER_BLOCK_SIZE=\"4096\"']).
-func defineFlags(n *graph.Node) string {
+func (gen *Generator) defineFlags(n *graph.Node) string {
+	flag := "-D"
+	if gen.Tc.IsMSVC() {
+		flag = "/D"
+	}
 	var b strings.Builder
 	for i, d := range n.Target.AttrStrings("defs") {
 		if i > 0 {
 			b.WriteByte(' ')
 		}
-		b.WriteString("-D")
+		b.WriteString(flag)
 		b.WriteString(d)
 	}
 	return b.String()

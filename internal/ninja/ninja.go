@@ -11,11 +11,12 @@ import (
 
 // Rule is a ninja rule definition.
 type Rule struct {
-	Name        string
-	Command     string
-	Description string
-	Depfile     string
-	Deps        string // e.g. "gcc"
+	Name           string
+	Command        string
+	Description    string
+	Depfile        string
+	Deps           string // "gcc" or "msvc"
+	MsvcDepsPrefix string // for deps=msvc: cl's /showIncludes line prefix
 }
 
 // Build is a ninja build statement: outputs = rule(inputs) with implicit deps.
@@ -69,6 +70,9 @@ func (f *File) Write(w io.Writer) error {
 		}
 		if r.Deps != "" {
 			fmt.Fprintf(bw, "  deps = %s\n", r.Deps)
+		}
+		if r.MsvcDepsPrefix != "" {
+			fmt.Fprintf(bw, "  msvc_deps_prefix = %s\n", r.MsvcDepsPrefix)
 		}
 		fmt.Fprintln(bw)
 	}
