@@ -17,15 +17,17 @@ type Rule struct {
 	Depfile        string
 	Deps           string // "gcc" or "msvc"
 	MsvcDepsPrefix string // for deps=msvc: cl's /showIncludes line prefix
+	Restat         bool   // re-stat outputs after running (prune downstream if unchanged)
 }
 
 // Build is a ninja build statement: outputs = rule(inputs) with implicit deps.
 type Build struct {
-	Outputs  []string
-	Rule     string
-	Inputs   []string
-	Implicit []string          // order-only-independent implicit deps ("| ...")
-	Vars     map[string]string // per-build variable bindings
+	Outputs         []string
+	ImplicitOutputs []string // implicit outputs ("build out | implicit_out: ...")
+	Rule            string
+	Inputs          []string
+	Implicit        []string          // order-only-independent implicit deps ("| ...")
+	Vars            map[string]string // per-build variable bindings
 }
 
 // File is an in-memory ninja file.
@@ -74,10 +76,17 @@ func (f *File) Write(w io.Writer) error {
 		if r.MsvcDepsPrefix != "" {
 			fmt.Fprintf(bw, "  msvc_deps_prefix = %s\n", r.MsvcDepsPrefix)
 		}
+		if r.Restat {
+			fmt.Fprintln(bw, "  restat = 1")
+		}
 		fmt.Fprintln(bw)
 	}
 	for _, b := range f.builds {
-		fmt.Fprintf(bw, "build %s: %s", strings.Join(escapeAll(b.Outputs), " "), b.Rule)
+		fmt.Fprintf(bw, "build %s", strings.Join(escapeAll(b.Outputs), " "))
+		if len(b.ImplicitOutputs) > 0 {
+			fmt.Fprintf(bw, " | %s", strings.Join(escapeAll(b.ImplicitOutputs), " "))
+		}
+		fmt.Fprintf(bw, ": %s", b.Rule)
 		if len(b.Inputs) > 0 {
 			fmt.Fprintf(bw, " %s", strings.Join(escapeAll(b.Inputs), " "))
 		}

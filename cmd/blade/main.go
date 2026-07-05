@@ -23,6 +23,7 @@ import (
 	"github.com/blade-build/blade-go/internal/sanitizer"
 	"github.com/blade-build/blade-go/internal/toolchain"
 	"github.com/blade-build/blade-go/internal/version"
+	"github.com/blade-build/blade-go/internal/windef"
 )
 
 // parseSanitizers parses + validates a --sanitizer value against the toolchain.
@@ -52,6 +53,30 @@ func main() {
 	// before cobra so they aren't part of the user-facing command tree.
 	if len(os.Args) >= 2 && (os.Args[1] == "__gen-resource" || os.Args[1] == "__gen-resource-index") {
 		if err := runResourceGen(os.Args[1], os.Args[2:]); err != nil {
+			fmt.Fprintln(os.Stderr, "blade: "+err.Error())
+			os.Exit(1)
+		}
+		return
+	}
+	if len(os.Args) >= 2 && os.Args[1] == "__cp" {
+		// __cp <src> <dst> -- stage a built file (e.g. a DLL next to a consumer exe).
+		if len(os.Args) != 4 {
+			fmt.Fprintln(os.Stderr, "blade: __cp: want <src> <dst>")
+			os.Exit(1)
+		}
+		if err := copyFile(os.Args[2], os.Args[3]); err != nil {
+			fmt.Fprintln(os.Stderr, "blade: "+err.Error())
+			os.Exit(1)
+		}
+		return
+	}
+	if len(os.Args) >= 2 && os.Args[1] == "__gen-windef" {
+		// __gen-windef <out.def> <obj>...  -- auto-export .def for a DLL.
+		if len(os.Args) < 4 {
+			fmt.Fprintln(os.Stderr, "blade: __gen-windef: want <out.def> <obj>...")
+			os.Exit(1)
+		}
+		if err := windef.Generate(os.Args[2], os.Args[3:]); err != nil {
 			fmt.Fprintln(os.Stderr, "blade: "+err.Error())
 			os.Exit(1)
 		}
@@ -563,6 +588,15 @@ func workspaceRoot() (string, error) {
 		return "", err
 	}
 	return build.FindRoot(cwd)
+}
+
+// copyFile copies src to dst (used by the `copy` ninja rule to stage DLLs).
+func copyFile(src, dst string) error {
+	in, err := os.ReadFile(src)
+	if err != nil {
+		return err
+	}
+	return os.WriteFile(dst, in, 0o644)
 }
 
 // runResourceGen dispatches the resource_library codegen subcommands.

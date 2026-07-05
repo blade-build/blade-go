@@ -650,3 +650,43 @@ func TestGenerateMSVCAsmRule(t *testing.T) {
 		}
 	}
 }
+
+func TestDllBasename(t *testing.T) {
+	if got := dllBasename("suites/cc_basic", "hello"); got != "suites.cc_basic.hello.dll" {
+		t.Errorf("dllBasename=%q", got)
+	}
+	if got := dllBasename("", "x"); got != "x.dll" {
+		t.Errorf("dllBasename root=%q", got)
+	}
+}
+
+func TestGenerateMSVCDynamicLink(t *testing.T) {
+	// A dynamic_link binary builds its cc_library dep as a DLL (+ import lib via
+	// windef/solink), links the import lib, and stages the DLL next to the exe.
+	g, _ := buildGraph(t, map[string]string{
+		"lib/BUILD": `cc_library(name = 'lib', srcs = ['l.cc'], visibility = ['PUBLIC'])`,
+		"app/BUILD": `cc_binary(name = 'app', srcs = ['m.cc'], deps = ['//lib:lib'], dynamic_link = True)`,
+	}, "//app:app")
+	tc := &toolchain.Toolchain{OS: "windows", CC: "cl.exe", AR: "lib.exe", Link: "link.exe"}
+	f, err := New(tc).Generate(g)
+	if err != nil {
+		t.Fatal(err)
+	}
+	out := f.String()
+	wants := []string{
+		"build build_release/lib/lib.def: windef",
+		"build build_release/lib/lib.lib.dll | build_release/lib/lib.dll.lib: solink",
+		"build build_release/app/lib.lib.dll: copy build_release/lib/lib.lib.dll", // staged next to exe
+		"build_release/lib/lib.dll.lib",                                           // app links the import lib
+	}
+	for _, w := range wants {
+		if !strings.Contains(out, w) {
+			t.Errorf("dynamic-link ninja missing %q\n---\n%s", w, out)
+		}
+	}
+	// The static archive of a DLL-ified lib must NOT be on the app link line.
+	if strings.Contains(out, "build build_release/app/app.exe: link") &&
+		strings.Contains(out, "libs = build_release/lib/lib.lib ") {
+		t.Errorf("dynamic-link app should link the import lib, not the static archive\n%s", out)
+	}
+}
