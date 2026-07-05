@@ -170,6 +170,16 @@ func (gen *Generator) Generate(g *graph.Graph) (*ninja.File, error) {
 	genHdrsOf := map[*graph.Node][]string{}
 	genFilesOf := map[*graph.Node]map[string]string{}
 	gen.foreignIncs = map[*graph.Node][]string{}
+	// MSVC DLLs: cc_library nodes reachable from a dynamic_link binary/test are
+	// built as DLLs (+ import libs); those consumers link the import libs and get
+	// the DLLs staged next to the exe. (gcc/clang stay static -- unchanged.)
+	var dynamicLibs map[*graph.Node]bool
+	if gen.Tc.IsMSVC() {
+		dynamicLibs = computeDynamicLibs(sorted)
+	}
+	dllOf := map[*graph.Node]string{}
+	implibOf := map[*graph.Node]string{}
+	copiedDLL := map[string]bool{}
 	for _, n := range sorted {
 		switch {
 		case n.Target.Type == "gen_rule":
@@ -225,6 +235,10 @@ func (gen *Generator) Generate(g *graph.Graph) (*ninja.File, error) {
 				// are NOT archived -- ld rejects an empty header object.
 				f.AddBuild(ninja.Build{Outputs: []string{lib}, Rule: "ar", Inputs: objs, Implicit: checkObjs})
 				libOf[n] = lib
+				if dynamicLibs[n] {
+					dll, implib := gen.emitDLL(f, n, objs, checkObjs, implibOf)
+					dllOf[n], implibOf[n] = dll, implib
+				}
 				continue
 			}
 			libs, implicit := gen.transitiveLibs(n, libOf)
@@ -249,6 +263,13 @@ func (gen *Generator) Generate(g *graph.Graph) (*ninja.File, error) {
 				// warn about "ignoring duplicate libraries".
 				vcpkgArgs = uniqueStrings(vcpkgArgs)
 				vcpkgArgs = append(vcpkgArgs, gen.Vcpkg.LinkExtras()...)
+			}
+			// A dynamic_link binary/test links its dependency DLLs' import libs
+			// (not the static archives) and gets those DLLs staged next to the exe.
+			if gen.Tc.IsMSVC() && n.Target.AttrBool("dynamic_link") && len(dynamicLibs) > 0 {
+				var dimpl []string
+				libs, dimpl = gen.dynamicLinkLibs(f, n, libOf, dllOf, implibOf, dynamicLibs, copiedDLL)
+				implicit = append(implicit, dimpl...)
 			}
 			f.AddBuild(ninja.Build{
 				Outputs:  []string{gen.binPath(n)},
@@ -361,6 +382,21 @@ func (gen *Generator) emitMSVCRules(f *ninja.File) {
 	f.AddRule(ninja.Rule{
 		Name: "link", Description: "LINK ${out}",
 		Command: "${link} /nologo ${in} ${libs} ${ldflags} /OUT:${out}",
+	})
+	// DLL rules: windef auto-exports the objects' symbols to a .def; solink builds
+	// the DLL (+ import lib via /IMPLIB) from that .def; copy stages a built DLL
+	// next to a consumer exe so it loads at runtime.
+	f.AddRule(ninja.Rule{
+		Name: "windef", Description: "WINDEF ${out}", Restat: true,
+		Command: "${self} __gen-windef ${out} ${in}",
+	})
+	f.AddRule(ninja.Rule{
+		Name: "solink", Description: "DLL ${out}", Restat: true,
+		Command: "${link} /nologo /DLL ${in} ${libs} ${ldflags} /DEF:${def} /IMPLIB:${implib} /OUT:${out}",
+	})
+	f.AddRule(ninja.Rule{
+		Name: "copy", Description: "COPY ${out}",
+		Command: "${self} __cp ${in} ${out}",
 	})
 	if gen.Tc.AS != "" {
 		// MASM: armasm64 (ARM64) takes gnu-style `-o out in`; ml64/ml (x86) take
@@ -983,6 +1019,136 @@ func (gen *Generator) libPath(n *graph.Node) string {
 
 func (gen *Generator) binPath(n *graph.Node) string {
 	return path.Join(gen.BuildDir, n.Target.Package, gen.Tc.BinName(n.Target.Name))
+}
+
+// dllBasename encodes a target's package + name into a collision-free DLL base
+// name (Windows DLLs share one search dir at load and can't be renamed per dir),
+// joined by '.': //suites/cc_basic:hello -> suites.cc_basic.hello.dll. Mirrors
+// Blade's _windows_dll_basename.
+func dllBasename(pkg, name string) string {
+	var parts []string
+	for _, p := range strings.Split(pkg, "/") {
+		if p != "" {
+			parts = append(parts, p)
+		}
+	}
+	parts = append(parts, name)
+	return strings.Join(parts, ".") + ".dll"
+}
+
+func (gen *Generator) dllPath(n *graph.Node) string {
+	return path.Join(gen.BuildDir, n.Target.Package, dllBasename(n.Target.Package, n.Target.Name))
+}
+
+// implibPath is the DLL's import library (<name>.dll.lib) -- distinct from the
+// static archive (<name>.lib) so both forms can coexist for a library consumed
+// both statically and dynamically.
+func (gen *Generator) implibPath(n *graph.Node) string {
+	return path.Join(gen.BuildDir, n.Target.Package, n.Target.Name+".dll.lib")
+}
+
+// computeDynamicLibs returns the cc_library nodes that must be built as DLLs:
+// those in the transitive dep closure of a dynamic_link cc_binary/cc_test.
+func computeDynamicLibs(sorted []*graph.Node) map[*graph.Node]bool {
+	dyn := map[*graph.Node]bool{}
+	var mark func(*graph.Node)
+	mark = func(x *graph.Node) {
+		for _, d := range x.Deps {
+			if d.Target.Type == "cc_library" {
+				// generate_dynamic=False forces static even under a dynamic_link
+				// consumer (gtest_main / test_main: main() belongs in the exe, not a
+				// DLL). Don't DLL-ize it, but still walk its deps.
+				if v, ok := d.Target.Attrs["generate_dynamic"].(bool); ok && !v {
+					mark(d)
+					continue
+				}
+				if !dyn[d] {
+					dyn[d] = true
+					mark(d)
+				}
+			} else {
+				mark(d) // walk through proto/resource/... to reach cc_library deps
+			}
+		}
+	}
+	for _, n := range sorted {
+		if (n.Target.Type == "cc_binary" || n.Target.Type == "cc_test") && n.Target.AttrBool("dynamic_link") {
+			mark(n)
+		}
+	}
+	return dyn
+}
+
+// dynamicLinkLibs returns the link inputs for a dynamic_link binary/test -- the
+// import lib of every transitive dynamic dep (and the static archive of any
+// non-dynamic dep, e.g. proto/resource) -- plus the implicit deps that stage each
+// dependency DLL next to the exe (a `copy` edge, deduped by destination) so it
+// loads at runtime. A DLL already sitting in the exe's dir is referenced in place.
+func (gen *Generator) dynamicLinkLibs(f *ninja.File, n *graph.Node, libOf, dllOf, implibOf map[*graph.Node]string, dynamicLibs map[*graph.Node]bool, copied map[string]bool) (libs, implicit []string) {
+	exeDir := path.Join(gen.BuildDir, n.Target.Package)
+	seen := map[*graph.Node]bool{}
+	var walk func(*graph.Node)
+	walk = func(x *graph.Node) {
+		for _, d := range x.Deps {
+			if seen[d] {
+				continue
+			}
+			seen[d] = true
+			switch {
+			case dynamicLibs[d] && implibOf[d] != "":
+				// A dynamic dep with a DLL: link its import lib, stage the DLL.
+				libs = append(libs, implibOf[d])
+				dll := dllOf[d]
+				dst := path.Join(exeDir, path.Base(dll))
+				if dst != dll {
+					if !copied[dst] {
+						copied[dst] = true
+						f.AddBuild(ninja.Build{Outputs: []string{dst}, Rule: "copy", Inputs: []string{dll}})
+					}
+					implicit = append(implicit, dst)
+				} else {
+					implicit = append(implicit, dll)
+				}
+			default:
+				// Non-dynamic (proto/resource) archive, if any; a header-only lib
+				// has none and contributes nothing to the link.
+				if lib, ok := libOf[d]; ok {
+					libs = append(libs, lib)
+				}
+			}
+			walk(d)
+		}
+	}
+	walk(n)
+	return libs, implicit
+}
+
+// emitDLL builds a cc_library's DLL + import library: a windef edge auto-exports
+// the objects' symbols to a .def, then solink links the DLL, its dynamic deps'
+// import libs, and syslibs. Returns the DLL and import-lib paths.
+func (gen *Generator) emitDLL(f *ninja.File, n *graph.Node, objs, checkObjs []string, implibOf map[*graph.Node]string) (dll, implib string) {
+	def := path.Join(gen.BuildDir, n.Target.Package, n.Target.Name+".def")
+	dll = gen.dllPath(n)
+	implib = gen.implibPath(n)
+	f.AddBuild(ninja.Build{Outputs: []string{def}, Rule: "windef", Inputs: objs, Implicit: checkObjs})
+	var deplibs []string
+	for _, d := range n.Deps {
+		if il, ok := implibOf[d]; ok {
+			deplibs = append(deplibs, il)
+		}
+	}
+	f.AddBuild(ninja.Build{
+		Outputs:         []string{dll},
+		ImplicitOutputs: []string{implib},
+		Rule:            "solink",
+		Inputs:          objs,
+		Implicit:        append([]string{def}, checkObjs...),
+		Vars: map[string]string{
+			"def": def, "implib": implib,
+			"libs": gen.linkArgs(deplibs, gen.transitiveSyslibs(n), nil),
+		},
+	})
+	return dll, implib
 }
 
 // BinPath returns the (workspace-relative) executable path for a cc_binary /
