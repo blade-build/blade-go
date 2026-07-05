@@ -1,7 +1,10 @@
 package toolchain
 
 import (
+	"path/filepath"
 	"reflect"
+	"runtime"
+	"strings"
 	"testing"
 )
 
@@ -44,4 +47,26 @@ func TestNaming(t *testing.T) {
 	if !(&Toolchain{OS: "windows"}).IsMSVC() || (&Toolchain{OS: "linux"}).IsMSVC() {
 		t.Error("IsMSVC should be true only on windows")
 	}
+}
+
+func TestDetectMSVC(t *testing.T) {
+	if runtime.GOOS != "windows" {
+		t.Skip("MSVC detection is Windows-only")
+	}
+	tc := Detect()
+	if !strings.EqualFold(filepath.Base(tc.CC), "cl.exe") {
+		t.Skipf("no MSVC on this box (CC=%q)", tc.CC)
+	}
+	if strings.ToLower(filepath.Base(tc.AR)) != "lib.exe" || strings.ToLower(filepath.Base(tc.Link)) != "link.exe" {
+		t.Errorf("MSVC tools: AR=%q Link=%q, want lib.exe/link.exe", tc.AR, tc.Link)
+	}
+	if envValue(tc.Env, "INCLUDE") == "" {
+		t.Error("MSVC dev env missing INCLUDE")
+	}
+	if envValue(tc.Env, "LIB") == "" {
+		t.Error("MSVC dev env missing LIB")
+	}
+	t.Logf("cl=%s\n  INCLUDE dirs=%d  LIB dirs=%d", tc.CC,
+		len(filepath.SplitList(envValue(tc.Env, "INCLUDE"))),
+		len(filepath.SplitList(envValue(tc.Env, "LIB"))))
 }

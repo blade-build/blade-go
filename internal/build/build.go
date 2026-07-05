@@ -447,6 +447,13 @@ func runNinja(root, buildFile string, extraArgs ...string) error {
 	cmd.Dir = root
 	cmd.Stdout = os.Stdout
 	cmd.Stderr = os.Stderr
+	// On MSVC, hand ninja the captured VS developer environment (INCLUDE/LIB/PATH/
+	// VSLANG) so cl/lib/link resolve their headers, libraries, and helper tools
+	// without a vcvars prompt. Appended last so it wins over the inherited env.
+	// Empty (gcc/clang) leaves the environment untouched.
+	if env := toolchain.Detect().Env; len(env) > 0 {
+		cmd.Env = append(os.Environ(), env...)
+	}
 	if err := cmd.Run(); err != nil {
 		return fmt.Errorf("ninja: %w", err)
 	}

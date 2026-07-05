@@ -13,14 +13,24 @@ import (
 
 // Toolchain describes the selected C/C++ tools and target platform.
 type Toolchain struct {
-	CC  string // C compiler driver
-	CXX string // C++ compiler driver
-	AR  string // static archiver
-	OS  string // "linux", "darwin", "windows"
+	CC   string   // C compiler driver (cl.exe on MSVC)
+	CXX  string   // C++ compiler driver (cl.exe on MSVC)
+	AR   string   // static archiver (lib.exe on MSVC)
+	Link string   // linker (link.exe on MSVC; empty for gcc/clang, which link via CXX)
+	OS   string   // "linux", "darwin", "windows"
+	Env  []string // extra environment for build subprocesses (MSVC dev env), or nil
 }
 
-// Detect resolves the toolchain from $CC/$CXX/$AR or common defaults.
+// Detect resolves the toolchain. On Windows it discovers MSVC (cl/lib/link) and
+// captures its developer environment; if no VS is found -- or on Linux/macOS --
+// it falls back to the gcc/clang tools from $CC/$CXX/$AR or common PATH defaults.
 func Detect() *Toolchain {
+	if goos() == "windows" {
+		if m := detectMSVC(msvcArch(runtime.GOARCH)); m.ok {
+			return &Toolchain{CC: m.cc, CXX: m.cc, AR: m.lib, Link: m.link, OS: "windows", Env: m.env}
+		}
+		// No MSVC: fall through (a clang/MinGW on PATH still gets gcc-style rules).
+	}
 	return &Toolchain{
 		CC:  pick(os.Getenv("CC"), "cc", "gcc", "clang"),
 		CXX: pick(os.Getenv("CXX"), "c++", "g++", "clang++"),
@@ -112,6 +122,9 @@ func (t *Toolchain) GroupsLibraries() bool { return t.OS == "linux" }
 // (gflags/glog flag registration, protobuf descriptors) must run even though
 // nothing references them. macOS uses -force_load; GNU ld uses --whole-archive.
 func (t *Toolchain) ForceLoad(archive string) []string {
+	if t.IsMSVC() {
+		return []string{"/WHOLEARCHIVE:" + archive}
+	}
 	if t.OS == "darwin" {
 		return []string{"-Wl,-force_load," + archive}
 	}
