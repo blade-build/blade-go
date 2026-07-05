@@ -184,6 +184,20 @@ func toolBuiltin() *starlark.Builtin {
 			return starlark.String(pickEnv("CXX", "c++")), nil
 		case "ar":
 			return starlark.String(pickEnv("AR", "ar")), nil
+		case "as":
+			// MASM assembler: present only on MSVC (armasm64 on ARM64, ml64/ml on
+			// x86). gcc/clang assemble .s/.S through the cc driver and have no
+			// MASM, so 'as' is None there -- which is how a BUILD file guards a
+			// MASM-only target (`if blade.cc_toolchain.tool('as') != None`). The
+			// name is enough for the guard; the compile rule resolves the real
+			// path from the MSVC environment.
+			if HostOS() == "windows" {
+				if HostArch() == "aarch64" {
+					return starlark.String("armasm64"), nil
+				}
+				return starlark.String("ml64"), nil
+			}
+			return starlark.None, nil
 		}
 		return starlark.None, nil
 	})

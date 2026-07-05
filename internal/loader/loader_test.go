@@ -402,3 +402,19 @@ func TestIsinstanceErrors(t *testing.T) {
 		t.Fatal("expected an error: isinstance type arg must be a type builtin")
 	}
 }
+
+func TestDesugarIsNone(t *testing.T) {
+	cases := []struct{ in, want string }{
+		{"x is None", "x == None"},
+		{"x is not None", "x != None"},
+		{"if blade.cc_toolchain.tool('as') is not None:", "if blade.cc_toolchain.tool('as') != None:"},
+		{"a is None and b is not None", "a == None and b != None"},
+		{"prefix_is_none = 1", "prefix_is_none = 1"}, // word-boundaried: no false rewrite
+		{"missing", "missing"},
+	}
+	for _, c := range cases {
+		if got := string(desugar([]byte(c.in))); got != c.want {
+			t.Errorf("desugar(%q)=%q, want %q", c.in, got, c.want)
+		}
+	}
+}

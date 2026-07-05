@@ -17,6 +17,7 @@ type Toolchain struct {
 	CXX  string   // C++ compiler driver (cl.exe on MSVC)
 	AR   string   // static archiver (lib.exe on MSVC)
 	Link string   // linker (link.exe on MSVC; empty for gcc/clang, which link via CXX)
+	AS   string   // MASM assembler (armasm64/ml64 on MSVC; empty elsewhere)
 	OS   string   // "linux", "darwin", "windows"
 	Env  []string // extra environment for build subprocesses (MSVC dev env), or nil
 }
@@ -27,7 +28,7 @@ type Toolchain struct {
 func Detect() *Toolchain {
 	if goos() == "windows" {
 		if m := detectMSVC(msvcArch(runtime.GOARCH)); m.ok {
-			return &Toolchain{CC: m.cc, CXX: m.cc, AR: m.lib, Link: m.link, OS: "windows", Env: m.env}
+			return &Toolchain{CC: m.cc, CXX: m.cc, AR: m.lib, Link: m.link, AS: m.as, OS: "windows", Env: m.env}
 		}
 		// No MSVC: fall through (a clang/MinGW on PATH still gets gcc-style rules).
 	}
