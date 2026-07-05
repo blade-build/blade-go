@@ -242,3 +242,30 @@ func TestVcpkgPrefixDisabled(t *testing.T) {
 		t.Error("with mapping disabled, the thirdparty target should load normally")
 	}
 }
+
+func TestFrameworkLibsInjectedAsCcTestDeps(t *testing.T) {
+	// A cc_test's framework libs (SetFrameworkLibs) are injected as deps and
+	// classified: a `//`-target is a real dep, a `#name` a syslib, a thirdparty
+	// entry a vcpkg dep. A cc_library gets none.
+	l := workspace(t, map[string]string{
+		"tf/BUILD":  `cc_library(name = 'main', srcs = ['main.cc'], visibility = ['PUBLIC'])`,
+		"t/BUILD":   `cc_test(name = 't', srcs = ['t.cc'])`,
+		"lib/BUILD": `cc_library(name = 'lib', srcs = ['l.cc'])`,
+	})
+	b := NewBuilder(l)
+	b.SetFrameworkLibs([]string{"//tf:main", "#pthread"}, nil)
+	g, err := b.Build([]string{"//t:t", "//lib:lib"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	tst := g.Node("//t:t")
+	if got := names(tst.Deps); len(got) != 1 || got[0] != "//tf:main" {
+		t.Errorf("cc_test deps=%v, want [//tf:main]", got)
+	}
+	if len(tst.Syslibs) != 1 || tst.Syslibs[0].Name != "pthread" {
+		t.Errorf("cc_test syslibs=%v, want [pthread]", tst.Syslibs)
+	}
+	if lib := g.Node("//lib:lib"); len(lib.Deps) != 0 {
+		t.Errorf("cc_library should get no framework deps, got %v", names(lib.Deps))
+	}
+}

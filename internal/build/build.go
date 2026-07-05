@@ -39,22 +39,105 @@ import (
 // something we don't model is skipped rather than failing the build.
 func configureCcFlags(gen *cc.Generator, cfg *config.Config) {
 	blade := bladectx.BuildModule("", gen.BuildDir, cfg)
-	cpp := evalConfigList(cfg, "cc_config", "cppflags", blade)
+	msvc := gen.Tc.IsMSVC()
+	// On MSVC, translate cc_config's gcc-syntax flags to their MSVC equivalents
+	// (mapFlagsToMSVC: -std/-O map over, gcc-only -W/-m/-f drop) -- projects write
+	// cc_config in gcc syntax and layer MSVC-specific bits in msvc_config, exactly
+	// as Blade's filter_cc_flags does.
+	xl := func(item string) []string {
+		v := evalConfigList(cfg, "cc_config", item, blade)
+		if msvc {
+			return mapFlagsToMSVC(v)
+		}
+		return v
+	}
+	cpp := xl("cppflags")
 	for _, d := range evalConfigList(cfg, "cc_config", "extra_incs", blade) {
-		cpp = append(cpp, "-I"+d)
+		if msvc {
+			cpp = append(cpp, `/I"`+d+`"`)
+		} else {
+			cpp = append(cpp, "-I"+d)
+		}
+	}
+	gen.Cxxflags = xl("cxxflags")
+	gen.Cflags = xl("cflags")
+	warn := xl("warnings")
+	cw := xl("c_warnings")
+	cxw := xl("cxx_warnings")
+	gen.Linkflags = xl("linkflags")
+	gen.Optimize = xl("optimize")
+
+	// msvc_config carries the MSVC-native flags (already MSVC syntax): its
+	// cppflags/cflags/cxxflags/warnings/linkflags replace, and append_* add to,
+	// the (translated) cc_config base. Only consulted on an MSVC toolchain.
+	if msvc {
+		mc := func(item string) []string { return evalConfigList(cfg, "msvc_config", item, blade) }
+		cpp = append(append(cpp, mc("cppflags")...), mc("append_cppflags")...)
+		gen.Cxxflags = append(append(gen.Cxxflags, mc("cxxflags")...), mc("append_cxxflags")...)
+		gen.Cflags = append(append(gen.Cflags, mc("cflags")...), mc("append_cflags")...)
+		warn = append(warn, mc("warnings")...)
+		gen.Linkflags = append(gen.Linkflags, mc("linkflags")...)
+		// Blade's msvc_config default linkflag: without an explicit /SUBSYSTEM,
+		// link.exe infers the entry point by scanning direct objects for main(),
+		// which fails (LNK1561) when main() lives only in a static lib such as
+		// gtest_main / test_main. /SUBSYSTEM:CONSOLE fixes the entry to
+		// mainCRTStartup, which then pulls main from the lib.
+		hasSubsystem := false
+		for _, f := range gen.Linkflags {
+			if strings.HasPrefix(strings.ToUpper(f), "/SUBSYSTEM") {
+				hasSubsystem = true
+			}
+		}
+		if !hasSubsystem {
+			gen.Linkflags = append([]string{"/SUBSYSTEM:CONSOLE"}, gen.Linkflags...)
+		}
 	}
 	gen.Cppflags = cpp
-	gen.Cxxflags = evalConfigList(cfg, "cc_config", "cxxflags", blade)
-	gen.Cflags = evalConfigList(cfg, "cc_config", "cflags", blade)
 
 	// warnings apply to all C-family compiles; c_warnings/cxx_warnings add the
 	// per-language ones. Kept in a separate ninja var so generated code (protoc /
 	// resource) opts out, matching Blade.
-	warn := evalConfigList(cfg, "cc_config", "warnings", blade)
-	gen.CWarnings = append(append([]string{}, warn...), evalConfigList(cfg, "cc_config", "c_warnings", blade)...)
-	gen.CxxWarnings = append(append([]string{}, warn...), evalConfigList(cfg, "cc_config", "cxx_warnings", blade)...)
-	gen.Linkflags = evalConfigList(cfg, "cc_config", "linkflags", blade)
-	gen.Optimize = evalConfigList(cfg, "cc_config", "optimize", blade)
+	gen.CWarnings = append(append([]string{}, warn...), cw...)
+	gen.CxxWarnings = append(append([]string{}, warn...), cxw...)
+}
+
+// gccToMSVCStd / gccToMSVCOpt map the gcc flags with clear MSVC counterparts;
+// mirrors Blade's _map_gcc_flags_to_msvc.
+var gccToMSVCStd = map[string]string{
+	"-std=c90": "/std:c90", "-std=c99": "/std:c99", "-std=c11": "/std:c11", "-std=c17": "/std:c17",
+	"-std=c++98": "/std:c++14", "-std=c++11": "/std:c++14", "-std=c++14": "/std:c++14",
+	"-std=c++17": "/std:c++17", "-std=c++20": "/std:c++20", "-std=c++2a": "/std:c++20",
+}
+var gccToMSVCOpt = map[string]string{
+	"-O0": "/Od", "-O1": "/O1", "-O2": "/O2", "-O3": "/O2", "-Os": "/O1", "-Og": "/Od",
+}
+
+// mapFlagsToMSVC translates a gcc-syntax flag list to MSVC. Flags already in MSVC
+// form (leading '/') pass through; -std/-O map over; -D/-I rewrite to /D //I;
+// -g* -> /Z7 (embedded, parallel-safe); gcc-only families (-W/-m/-f) and any
+// other unrecognized gcc flag are dropped (cl would reject or warn on them).
+func mapFlagsToMSVC(flags []string) []string {
+	var out []string
+	for _, f := range flags {
+		switch {
+		case f == "":
+		case strings.HasPrefix(f, "/"):
+			out = append(out, f)
+		case gccToMSVCStd[f] != "":
+			out = append(out, gccToMSVCStd[f])
+		case gccToMSVCOpt[f] != "":
+			out = append(out, gccToMSVCOpt[f])
+		case strings.HasPrefix(f, "-g"):
+			out = append(out, "/Z7")
+		case strings.HasPrefix(f, "-D"):
+			out = append(out, "/D"+f[2:])
+		case strings.HasPrefix(f, "-I"):
+			out = append(out, `/I"`+f[2:]+`"`)
+		default:
+			// -W* / -m* / -f* / anything else gcc-specific: no MSVC meaning.
+		}
+	}
+	return out
 }
 
 // evalConfigList returns a config list item as []string, evaluating a lambda
@@ -106,46 +189,18 @@ func goStrings(v any) []string {
 	return out
 }
 
-// configureTestLibs resolves the framework libs a cc_test / cc_benchmark links
-// from config: cc_test_config's gtest_libs / gtest_main_libs for tests, and
-// cc_config's benchmark_libs / benchmark_main_libs for benchmarks. Each entry is
-// classified -- a "#name" is a syslib, a "thirdparty/<port>:<lib>" a vcpkg lib.
-func configureTestLibs(gen *cc.Generator, cfg *config.Config) {
-	blade := bladectx.BuildModule("", gen.BuildDir, cfg)
-	var gtest []string
-	gtest = append(gtest, evalConfigList(cfg, "cc_test_config", "gtest_libs", blade)...)
-	gtest = append(gtest, evalConfigList(cfg, "cc_test_config", "gtest_main_libs", blade)...)
-	gen.TestVcpkgs, gen.TestSyslibs = classifyFrameworkLibs(gtest)
-
-	var bench []string
-	bench = append(bench, evalConfigList(cfg, "cc_config", "benchmark_libs", blade)...)
-	bench = append(bench, evalConfigList(cfg, "cc_config", "benchmark_main_libs", blade)...)
-	gen.BenchmarkVcpkgs, gen.BenchmarkSyslibs = classifyFrameworkLibs(bench)
-}
-
-// classifyFrameworkLibs splits framework lib labels into vcpkg deps
-// ("thirdparty/<port>:<lib>") and syslibs ("#name").
-func classifyFrameworkLibs(labels []string) (vcpkgs []label.VcpkgDep, syslibs []string) {
-	const prefix = "thirdparty/"
-	for _, s := range labels {
-		if strings.HasPrefix(s, "#") {
-			syslibs = append(syslibs, strings.TrimPrefix(s, "#"))
-			continue
-		}
-		lbl, err := label.Parse(s, "")
-		if err != nil {
-			continue
-		}
-		if strings.HasPrefix(lbl.Package, prefix) {
-			rest := strings.TrimPrefix(lbl.Package, prefix)
-			port := rest
-			if i := strings.IndexByte(rest, '/'); i >= 0 {
-				port = rest[:i]
-			}
-			vcpkgs = append(vcpkgs, label.VcpkgDep{Port: port, Lib: lbl.Name})
-		}
-	}
-	return vcpkgs, syslibs
+// frameworkLibs returns the config-driven framework deps injected into every
+// cc_test (gtest_libs + gtest_main_libs) and cc_benchmark (benchmark_libs +
+// benchmark_main_libs). They are handed to the graph builder as deps, so a
+// `//`-target framework, a `#syslib`, or a `thirdparty/<port>` vcpkg lib is
+// classified and linked uniformly.
+func frameworkLibs(cfg *config.Config, buildDir string) (test, bench []string) {
+	blade := bladectx.BuildModule("", buildDir, cfg)
+	test = append(evalConfigList(cfg, "cc_test_config", "gtest_libs", blade),
+		evalConfigList(cfg, "cc_test_config", "gtest_main_libs", blade)...)
+	bench = append(evalConfigList(cfg, "cc_config", "benchmark_libs", blade),
+		evalConfigList(cfg, "cc_config", "benchmark_main_libs", blade)...)
+	return test, bench
 }
 
 // configureVcpkg reads BLADE_ROOT's vcpkg_config (baseline + pinned packages)
@@ -329,6 +384,9 @@ func loadGraph(root string, targets []string, buildDir string) (*loader.Loader, 
 		}
 	}
 	b := graph.NewBuilder(l)
+	// cc_test / cc_benchmark link their framework (gtest / google-benchmark) from
+	// config; inject those as deps so they build and link like any other dep.
+	b.SetFrameworkLibs(frameworkLibs(l.Config, buildDir))
 	expanded, err := b.Expand(targets)
 	if err != nil {
 		return nil, nil, nil, err
@@ -379,7 +437,6 @@ func plan(root string, targets []string, profile, debugInfo string, sanitizers [
 	tm.mark("vcpkg-install") // one-time provisioning (idempotent), not analysis
 	configureProto(gen, l.Config)
 	configureCcFlags(gen, l.Config)
-	configureTestLibs(gen, l.Config)
 	f, err := gen.Generate(g)
 	tm.mark("generate")
 	tm.report(g.Len())

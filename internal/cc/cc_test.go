@@ -612,3 +612,18 @@ func TestGenerateMSVCRules(t *testing.T) {
 		}
 	}
 }
+
+func TestPrivateIncsOnCompile(t *testing.T) {
+	// A target's own `incs` (private include dirs) must be added to its compiles,
+	// package-relative, like Blade's attr['incs'].
+	g, _ := buildGraph(t, map[string]string{
+		"lib/BUILD": `cc_library(name = 'g', srcs = ['g.cc'], incs = ['include'])`,
+	}, "//lib:g")
+	f, err := New(toolchain.Detect()).Generate(g)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if out := f.String(); !strings.Contains(out, "lib/include") {
+		t.Errorf("private inc 'lib/include' not on the compile include path:\n%s", out)
+	}
+}
