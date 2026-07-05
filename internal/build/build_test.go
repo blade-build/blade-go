@@ -795,3 +795,19 @@ func TestGlobToRegex(t *testing.T) {
 		}
 	}
 }
+
+func TestMapFlagsToMSVC(t *testing.T) {
+	got := mapFlagsToMSVC([]string{
+		"-std=c++17", "-O2", "-g", "-DFOO=1", "-Iinc/dir",
+		"-Wall", "-Werror", "-fPIC", "-march=native", "/EHsc", "-std=c++20",
+	})
+	want := []string{"/std:c++17", "/O2", "/Z7", "/DFOO=1", `/I"inc/dir"`, "/EHsc", "/std:c++20"}
+	if !reflect.DeepEqual(got, want) {
+		t.Errorf("mapFlagsToMSVC:\n got %v\nwant %v", got, want)
+	}
+	// gcc/clang path untouched: non-MSVC callers never invoke it, but a nil/empty
+	// input must round-trip cleanly.
+	if out := mapFlagsToMSVC(nil); len(out) != 0 {
+		t.Errorf("mapFlagsToMSVC(nil)=%v, want empty", out)
+	}
+}

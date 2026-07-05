@@ -58,6 +58,22 @@ type Builder struct {
 	// legacy_public_targets marks PUBLIC by default (blade's grandfather list for
 	// targets that predate explicit visibility). Populated lazily from config.
 	legacyPublic map[string]bool
+
+	// testFrameworkLibs / benchFrameworkLibs are the framework deps every cc_test /
+	// cc_benchmark links from config (cc_test_config.gtest_libs + gtest_main_libs;
+	// cc_config.benchmark_libs + benchmark_main_libs). They are injected as deps so
+	// each kind -- a `//`-target framework (blade-test's test_framework), a
+	// `#syslib`, or a `thirdparty/<port>` vcpkg lib -- is classified and linked by
+	// the normal dep machinery. Set via SetFrameworkLibs before Build.
+	testFrameworkLibs  []string
+	benchFrameworkLibs []string
+}
+
+// SetFrameworkLibs registers the config-driven framework deps injected into every
+// cc_test (test) and cc_benchmark (bench). Call before Build.
+func (b *Builder) SetFrameworkLibs(test, bench []string) {
+	b.testFrameworkLibs = test
+	b.benchFrameworkLibs = bench
 }
 
 // NewBuilder returns a Builder that loads packages through l, mapping
@@ -270,39 +286,58 @@ func (b *Builder) resolve(lbl label.Label) (*Node, error) {
 	b.graph.nodes[lbl.String()] = n
 	b.graph.order = append(b.graph.order, n)
 
-	for _, dep := range tgt.AttrStrings("deps") {
-		if label.IsVcpkg(dep) {
-			n.Vcpkgs = append(n.Vcpkgs, label.ParseVcpkg(dep))
-			continue
+	deps := tgt.AttrStrings("deps")
+	// A cc_test / cc_benchmark also links its framework from config (gtest /
+	// benchmark libs); inject them here so they resolve through the same path.
+	switch tgt.Type {
+	case "cc_test":
+		deps = append(append([]string{}, deps...), b.testFrameworkLibs...)
+	case "cc_benchmark":
+		deps = append(append([]string{}, deps...), b.benchFrameworkLibs...)
+	}
+	for _, dep := range deps {
+		if err := b.addDep(n, dep, lbl); err != nil {
+			return nil, err
 		}
-		dlbl, err := label.Parse(dep, tgt.Package)
-		if err != nil {
-			return nil, fmt.Errorf("%s: dep %q: %w", lbl, dep, err)
-		}
-		if dlbl.IsSyslib() {
-			n.Syslibs = append(n.Syslibs, dlbl)
-			continue
-		}
-		if v, ok := b.vcpkgFromThirdparty(dlbl); ok && !b.hasRealTarget(dlbl) {
-			// //thirdparty/<port>:<lib> with no BUILD of its own is a vcpkg port.
-			// But a source-built thirdparty package (jsoncpp) has a real BUILD;
-			// its own gen_rule chain deps must resolve to those targets, not be
-			// misrouted to a vcpkg port that shares the directory name.
-			n.Vcpkgs = append(n.Vcpkgs, v)
-			continue
-		}
-		dn, err := b.resolve(dlbl)
-		if err != nil {
-			return nil, fmt.Errorf("%s: dep %s: %w", lbl, dep, err)
-		}
-		vis := dn.Target.AttrStrings("visibility")
-		legacyPub := len(vis) == 0 && b.legacyPublic[dn.Target.Package+":"+dn.Target.Name]
-		if !legacyPub && !label.VisibleTo(vis, dn.Target.Package, lbl) {
-			return nil, fmt.Errorf("%s depends on %s, which is not visible to it", lbl, dlbl)
-		}
-		n.Deps = append(n.Deps, dn)
 	}
 	return n, nil
+}
+
+// addDep classifies one dependency of n (a vcpkg ref, #syslib, thirdparty vcpkg
+// port, or a real target) and records it on the right slice.
+func (b *Builder) addDep(n *Node, dep string, lbl label.Label) error {
+	tgt := n.Target
+	if label.IsVcpkg(dep) {
+		n.Vcpkgs = append(n.Vcpkgs, label.ParseVcpkg(dep))
+		return nil
+	}
+	dlbl, err := label.Parse(dep, tgt.Package)
+	if err != nil {
+		return fmt.Errorf("%s: dep %q: %w", lbl, dep, err)
+	}
+	if dlbl.IsSyslib() {
+		n.Syslibs = append(n.Syslibs, dlbl)
+		return nil
+	}
+	if v, ok := b.vcpkgFromThirdparty(dlbl); ok && !b.hasRealTarget(dlbl) {
+		// //thirdparty/<port>:<lib> with no BUILD of its own is a vcpkg port.
+		// But a source-built thirdparty package (jsoncpp) has a real BUILD;
+		// its own gen_rule chain deps must resolve to those targets, not be
+		// misrouted to a vcpkg port that shares the directory name.
+		n.Vcpkgs = append(n.Vcpkgs, v)
+		return nil
+	}
+	dn, err := b.resolve(dlbl)
+	if err != nil {
+		return fmt.Errorf("%s: dep %s: %w", lbl, dep, err)
+	}
+	vis := dn.Target.AttrStrings("visibility")
+	legacyPub := len(vis) == 0 && b.legacyPublic[dn.Target.Package+":"+dn.Target.Name]
+	if !legacyPub && !label.VisibleTo(vis, dn.Target.Package, lbl) {
+		return fmt.Errorf("%s depends on %s, which is not visible to it", lbl, dlbl)
+	}
+	n.Deps = append(n.Deps, dn)
+	return nil
 }
 
 // TopoSort returns the nodes with every node ordered after all of its

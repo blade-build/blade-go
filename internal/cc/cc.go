@@ -18,30 +18,26 @@ import (
 
 // Generator turns a resolved graph into a ninja file.
 type Generator struct {
-	Tc               *toolchain.Toolchain
-	Root             string           // workspace root (abs), for locating prebuilt library files
-	BuildDir         string           // build output dir (e.g. "build_release")
-	Profile          string           // "release" or "debug" (drives optimize/NDEBUG flags)
-	DebugInfo        string           // "" (project default) or no|low|mid|high (-g level override)
-	Self             string           // path to the blade-go binary (resource_library codegen)
-	Protoc           string           // protoc executable (proto_library codegen)
-	ProtobufLibs     []string         // system libs a proto_library pulls in (bare names)
-	ProtobufVcpkgs   []label.VcpkgDep // protobuf libs pinned in vcpkg (flare's idiom)
-	Vcpkg            *vcpkg.Resolver  // resolves vcpkg#port:lib thirdparty deps
-	Cppflags         []string         // cc_config flags for all C-family compiles
-	Cxxflags         []string         // cc_config flags for C++ compiles only
-	Cflags           []string         // cc_config flags for C compiles only
-	CWarnings        []string         // cc_config warnings for C compiles (not generated code)
-	CxxWarnings      []string         // cc_config warnings for C++ compiles (not generated code)
-	Linkflags        []string         // cc_config link flags (ldflags)
-	Optimize         []string         // cc_config optimize flags (override the release default)
-	SanitizeCompile  []string         // --sanitizer compile flags (all compiles, incl. generated)
-	SanitizeLink     []string         // --sanitizer link flags
-	CoverageFlags    []string         // --coverage flags (both compile and link: gcc/clang --coverage)
-	TestVcpkgs       []label.VcpkgDep // cc_test_config gtest libs that resolve to vcpkg
-	TestSyslibs      []string         // cc_test_config gtest libs that are #-syslibs
-	BenchmarkVcpkgs  []label.VcpkgDep // cc_config benchmark libs that resolve to vcpkg
-	BenchmarkSyslibs []string         // cc_config benchmark libs that are #-syslibs
+	Tc              *toolchain.Toolchain
+	Root            string           // workspace root (abs), for locating prebuilt library files
+	BuildDir        string           // build output dir (e.g. "build_release")
+	Profile         string           // "release" or "debug" (drives optimize/NDEBUG flags)
+	DebugInfo       string           // "" (project default) or no|low|mid|high (-g level override)
+	Self            string           // path to the blade-go binary (resource_library codegen)
+	Protoc          string           // protoc executable (proto_library codegen)
+	ProtobufLibs    []string         // system libs a proto_library pulls in (bare names)
+	ProtobufVcpkgs  []label.VcpkgDep // protobuf libs pinned in vcpkg (flare's idiom)
+	Vcpkg           *vcpkg.Resolver  // resolves vcpkg#port:lib thirdparty deps
+	Cppflags        []string         // cc_config flags for all C-family compiles
+	Cxxflags        []string         // cc_config flags for C++ compiles only
+	Cflags          []string         // cc_config flags for C compiles only
+	CWarnings       []string         // cc_config warnings for C compiles (not generated code)
+	CxxWarnings     []string         // cc_config warnings for C++ compiles (not generated code)
+	Linkflags       []string         // cc_config link flags (ldflags)
+	Optimize        []string         // cc_config optimize flags (override the release default)
+	SanitizeCompile []string         // --sanitizer compile flags (all compiles, incl. generated)
+	SanitizeLink    []string         // --sanitizer link flags
+	CoverageFlags   []string         // --coverage flags (both compile and link: gcc/clang --coverage)
 
 	foreignIncs map[*graph.Node][]string // include dirs exported by foreign_cc_library nodes
 	libOf       map[*graph.Node]string   // node -> its archive path (populated by Generate; for LinkArchives)
@@ -238,20 +234,10 @@ func (gen *Generator) Generate(g *graph.Graph) (*ninja.File, error) {
 					vcpkgArgs = append(vcpkgArgs, gen.Vcpkg.LibArg(v.Lib))
 				}
 			}
-			// cc_test / cc_benchmark link their configured framework: gtest
-			// (cc_test_config) for tests, google-benchmark (cc_config) for benches.
-			switch n.Target.Type {
-			case "cc_test":
-				for _, v := range gen.TestVcpkgs {
-					vcpkgArgs = append(vcpkgArgs, gen.Vcpkg.LibArg(v.Lib))
-				}
-				syslibs = uniqueStrings(append(syslibs, gen.TestSyslibs...))
-			case "cc_benchmark":
-				for _, v := range gen.BenchmarkVcpkgs {
-					vcpkgArgs = append(vcpkgArgs, gen.Vcpkg.LibArg(v.Lib))
-				}
-				syslibs = uniqueStrings(append(syslibs, gen.BenchmarkSyslibs...))
-			}
+			// cc_test / cc_benchmark link their configured framework (gtest /
+			// google-benchmark) via deps injected by the graph builder, so the
+			// transitive lib/vcpkg/syslib collection above already covers them.
+
 			// Extra link flags the pinned ports declare (macOS -framework for
 			// curl's TLS backend). Only needed once vcpkg archives are linked.
 			if len(vcpkgArgs) > 0 {
@@ -743,6 +729,15 @@ func uniqueStrings(ss []string) []string {
 func (gen *Generator) includes(n *graph.Node) string {
 	dirs := []string{".", gen.BuildDir}
 	seen := map[string]bool{".": true, gen.BuildDir: true}
+	// The target's own private `incs` (Blade's attr['incs']): package-relative
+	// include dirs for this target's compiles only, not propagated to consumers.
+	for _, d := range n.Target.AttrStrings("incs") {
+		d = normInc(n.Target.Package, d)
+		if !seen[d] {
+			seen[d] = true
+			dirs = append(dirs, d)
+		}
+	}
 	visited := map[*graph.Node]bool{} // walk each node once, not once per DAG path
 	var walk func(*graph.Node)
 	walk = func(node *graph.Node) {
@@ -768,13 +763,9 @@ func (gen *Generator) includes(n *graph.Node) string {
 		}
 	}
 	walk(n)
+	// A cc_test/cc_benchmark's framework (gtest/google-benchmark) is a dep now, so
+	// a vcpkg framework already shows up in transitiveVcpkgs.
 	needVcpkg := len(gen.transitiveVcpkgs(n)) > 0
-	if n.Target.Type == "cc_test" && len(gen.TestVcpkgs) > 0 {
-		needVcpkg = true // gtest headers live in the vcpkg tree
-	}
-	if n.Target.Type == "cc_benchmark" && len(gen.BenchmarkVcpkgs) > 0 {
-		needVcpkg = true // google-benchmark headers live in the vcpkg tree
-	}
 	if len(gen.ProtobufVcpkgs) > 0 && (n.Target.Type == "proto_library" || gen.hasProtoInClosure(n)) {
 		needVcpkg = true // protobuf headers (for generated .pb.cc) live in the vcpkg tree
 	}

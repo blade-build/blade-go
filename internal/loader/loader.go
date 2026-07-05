@@ -51,11 +51,19 @@ func dirOf(thread *starlark.Thread) string {
 }
 
 // configNames are the configuration functions a BLADE_ROOT / blade.conf may call.
+// blade-go records every section (so a full multi-language BLADE_ROOT loads) but
+// only consumes the cc/proto/vcpkg/coverage/sanitizer ones it implements; the
+// language configs it doesn't build (java/scala/go/cuda/...) are accepted and
+// ignored rather than erroring as "undefined".
 var configNames = []string{
-	"global_config",
+	"global_config", "link_config",
 	"cc_config", "cc_library_config", "cc_binary_config", "cc_test_config",
 	"cc_toolchain_config", "msvc_config",
-	"proto_library_config", "thrift_library_config", "vcpkg_config",
+	"coverage_config", "sanitizer_config",
+	"proto_library_config", "thrift_library_config", "fbthrift_library_config",
+	"vcpkg_config", "lex_yacc_config", "cuda_config",
+	"java_config", "java_binary_config", "java_test_config",
+	"scala_config", "scala_test_config", "go_config",
 }
 
 // Loader accumulates targets and configuration across the files it loads.
