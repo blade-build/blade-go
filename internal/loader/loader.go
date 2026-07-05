@@ -172,11 +172,29 @@ func (l *Loader) buildEnv() starlark.StringDict {
 	return pre
 }
 
+// isNotNoneRE / isNoneRE desugar Python's `X is [not] None` -- common in Blade
+// BUILD files -- to Starlark's `X == None` / `X != None` (Starlark has no `is`).
+// The `is not None` form is handled first; `\bis\s+None\b` can't match it (the
+// `not` sits between), so the two rewrites don't interfere. Applied to raw source
+// before parsing; a string literal containing the exact phrase " is None" would
+// be rewritten too, but that essentially never occurs in a BUILD file.
+var (
+	isNotNoneRE = regexp.MustCompile(`\bis\s+not\s+None\b`)
+	isNoneRE    = regexp.MustCompile(`\bis\s+None\b`)
+)
+
+func desugar(src []byte) []byte {
+	src = isNotNoneRE.ReplaceAll(src, []byte("!= None"))
+	src = isNoneRE.ReplaceAll(src, []byte("== None"))
+	return src
+}
+
 func (l *Loader) exec(pathname, pkg, dir string, pre starlark.StringDict) error {
 	src, err := os.ReadFile(pathname)
 	if err != nil {
 		return err
 	}
+	src = desugar(src)
 	if err := l.applyIncludes(string(src), filepath.Dir(pathname), pre); err != nil {
 		return fmt.Errorf("%s: %w", pathname, err)
 	}
@@ -209,6 +227,7 @@ func (l *Loader) loadExtension(_ *starlark.Thread, module string) (starlark.Stri
 	if err != nil {
 		return nil, fmt.Errorf("load(%q): %w", module, err)
 	}
+	src = desugar(src)
 	pre := starlark.StringDict{
 		"blade":      bladectx.BuildModule("", l.BuildDir, l.Config),
 		"native":     l.nativeModule(),
@@ -270,6 +289,7 @@ func (l *Loader) includeGlobals(module, baseDir string) (starlark.StringDict, er
 	if err != nil {
 		return nil, fmt.Errorf("include(%q): %w", module, err)
 	}
+	src = desugar(src)
 	pre := l.buildEnv()
 	if err := l.applyIncludes(string(src), filepath.Dir(p), pre); err != nil {
 		return nil, fmt.Errorf("include(%q): %w", module, err)

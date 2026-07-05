@@ -11,9 +11,9 @@ import (
 // msvcInfo is the resolved MSVC toolchain: the compiler/archiver/linker and the
 // developer environment (INCLUDE/LIB/PATH/...) captured from vcvarsall.
 type msvcInfo struct {
-	cc, lib, link string
-	env           []string
-	ok            bool
+	cc, lib, link, as string
+	env               []string
+	ok                bool
 }
 
 var (
@@ -50,10 +50,20 @@ func probeMSVC(arch string) msvcInfo {
 	if cc == "" || lib == "" || link == "" {
 		return msvcInfo{}
 	}
+	// MASM assembler: armasm64 on ARM64, ml64/ml on x86. Optional (absent on some
+	// installs); .asm sources just won't build if missing.
+	asName := "ml64.exe"
+	switch arch {
+	case "arm64":
+		asName = "armasm64.exe"
+	case "x86":
+		asName = "ml.exe"
+	}
+	as := lookInPath(asName, path)
 	// Force the English "/showIncludes" prefix so ninja's msvc_deps_prefix (and
 	// blade-go's own inclusion parsing) match on a localized VS. See Blade #1154.
 	env = append(env, "VSLANG=1033")
-	return msvcInfo{cc: cc, lib: lib, link: link, env: env, ok: true}
+	return msvcInfo{cc: cc, lib: lib, link: link, as: as, env: env, ok: true}
 }
 
 // findVcvarsall locates VC\Auxiliary\Build\vcvarsall.bat via vswhere.

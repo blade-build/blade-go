@@ -627,3 +627,26 @@ func TestPrivateIncsOnCompile(t *testing.T) {
 		t.Errorf("private inc 'lib/include' not on the compile include path:\n%s", out)
 	}
 }
+
+func TestGenerateMSVCAsmRule(t *testing.T) {
+	// A .asm source on an MSVC toolchain with an assembler routes to the `as`
+	// rule (armasm64 -> gnu-style -o), not cl.
+	g, _ := buildGraph(t, map[string]string{
+		"a/BUILD": `cc_library(name = 'a', srcs = ['add.asm'], visibility = ['PUBLIC'])`,
+	}, "//a:a")
+	tc := &toolchain.Toolchain{OS: "windows", CC: "cl.exe", AR: "lib.exe", Link: "link.exe", AS: "armasm64.exe"}
+	f, err := New(tc).Generate(g)
+	if err != nil {
+		t.Fatal(err)
+	}
+	out := f.String()
+	for _, w := range []string{
+		"as = armasm64.exe",
+		"${as} ${extra_compile_flags} -o ${out} ${in}",
+		"build build_release/a/a.objs/add.asm.obj: as a/add.asm",
+	} {
+		if !strings.Contains(out, w) {
+			t.Errorf("MSVC asm ninja missing %q\n---\n%s", w, out)
+		}
+	}
+}

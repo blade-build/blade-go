@@ -133,6 +133,9 @@ func (gen *Generator) Generate(g *graph.Graph) (*ninja.File, error) {
 	if gen.Tc.Link != "" {
 		f.SetVar("link", gen.Tc.Link) // MSVC link.exe; gcc/clang link via ${cxx}
 	}
+	if gen.Tc.AS != "" {
+		f.SetVar("as", gen.Tc.AS) // MSVC MASM assembler (armasm64/ml64)
+	}
 	f.SetVar("protoc", gen.Protoc)
 	self := gen.Self
 	if self == "" {
@@ -359,6 +362,21 @@ func (gen *Generator) emitMSVCRules(f *ninja.File) {
 		Name: "link", Description: "LINK ${out}",
 		Command: "${link} /nologo ${in} ${libs} ${ldflags} /OUT:${out}",
 	})
+	if gen.Tc.AS != "" {
+		// MASM: armasm64 (ARM64) takes gnu-style `-o out in`; ml64/ml (x86) take
+		// `/c /Fo out in`. No preprocessor/includes -- pure assembly.
+		if strings.Contains(strings.ToLower(gen.Tc.AS), "armasm") {
+			f.AddRule(ninja.Rule{
+				Name: "as", Description: "ASM ${out}",
+				Command: "${as} ${extra_compile_flags} -o ${out} ${in}",
+			})
+		} else {
+			f.AddRule(ninja.Rule{
+				Name: "as", Description: "ASM ${out}",
+				Command: "${as} /nologo /c ${extra_compile_flags} /Fo${out} ${in}",
+			})
+		}
+	}
 }
 
 // prebuiltLib resolves a prebuilt_cc_library's archive (workspace-relative). The
@@ -641,6 +659,10 @@ func (gen *Generator) emitCompiles(f *ninja.File, n *graph.Node, implicitHdrs []
 		switch {
 		case header:
 			rule = "cxx_header"
+		case gen.Tc.AS != "" && isAsmSource(src):
+			// MSVC: .asm goes to the MASM assembler, not cl. (gcc/clang assemble
+			// .s/.S via the cc driver, so they keep the default `cc` rule.)
+			rule = "as"
 		case isCXXSource(src):
 			rule = "cxx"
 		}
